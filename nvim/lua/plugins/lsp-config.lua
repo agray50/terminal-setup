@@ -68,76 +68,36 @@ return {
 			})
 			vim.lsp.config("terraform_ls", {})
 
-			-- set keybinds
+			-- Neovim 0.11 LSP defaults (built-in, no config needed):
+			-- grn  rename        gra  code action     grr  references
+			-- gri  impl          grt  type def        gO   doc symbols
+			-- K    hover         <C-W>d  open float   [d/]d  diagnostics
 			vim.api.nvim_create_autocmd("LspAttach", {
 				callback = function()
-					-- set vim.keymaps
 					vim.keymap.set(
 						"n",
-						"<leader>lr",
-						"<cmd>Telescope lsp_references<CR>",
-						{ desc = "Show LSP references", noremap = true, silent = true }
+						"grd",
+						"<cmd>Telescope lsp_definitions<CR>",
+						{ desc = "Go to definition", noremap = true, silent = true }
 					)
 					vim.keymap.set(
 						"n",
-						"<leader>lD",
+						"grD",
 						vim.lsp.buf.declaration,
 						{ desc = "Go to declaration", noremap = true, silent = true }
 					)
 					vim.keymap.set(
 						"n",
-						"<leader>ld",
-						"<cmd>Telescope lsp_definitions<CR>",
-						{ desc = "Show LSP definitions", noremap = true, silent = true }
-					)
-					vim.keymap.set(
-						"n",
-						"<leader>li",
-						"<cmd>Telescope lsp_implementations<CR>",
-						{ desc = "Show LSP implementations", noremap = true, silent = true }
-					)
-					vim.keymap.set(
-						"n",
-						"<leader>lt",
-						"<cmd>Telescope lsp_type_definitions<CR>",
-						{ desc = "Show LSP type definitions", noremap = true, silent = true }
-					)
-					vim.keymap.set(
-						"n",
-						"<leader>D",
+						"grq",
 						"<cmd>Telescope diagnostics bufnr=0<CR>",
 						{ desc = "Show buffer diagnostics", noremap = true, silent = true }
 					)
-					vim.keymap.set(
-						"n",
-						"<leader>d",
-						vim.diagnostic.open_float,
-						{ desc = "Show line diagnostics", noremap = true, silent = true }
-					)
-					vim.keymap.set("n", "[d", function()
-						vim.diagnostic.jump({ count = -1 })
-					end, { desc = "Go to previous diagnostics", noremap = true, silent = true })
-					vim.keymap.set("n", "]d", function()
-						vim.diagnostic.jump({ count = 1 })
-					end, { desc = "Go to next diagnostic", noremap = true, silent = true })
-					vim.keymap.set(
-						"n",
-						"K",
-						vim.lsp.buf.hover,
-						{ desc = "Show documentation for what is under the cursor", noremap = true, silent = true }
-					)
-					vim.keymap.set(
-						{ "n", "v" },
-						"<leader>ca",
-						vim.lsp.buf.code_action,
-						{ desc = "See available code actions", noremap = true, silent = true }
-					) -- in visual mode, this will apply to the current selection
-					vim.keymap.set("n", "<leader>rn", function()
+					vim.keymap.set("n", "grN", function()
 						return ":IncRename " .. vim.fn.expand("<cword>")
-					end, { desc = "Smart rename", expr = true, noremap = true, silent = true }) -- depends on inc-rename plugin
+					end, { desc = "Rename (IncRename)", expr = true, noremap = true, silent = true })
 					vim.keymap.set(
 						"n",
-						"<leader>rs",
+						"grs",
 						":LspRestart<CR>",
 						{ desc = "Restart LSP", noremap = true, silent = true }
 					)
