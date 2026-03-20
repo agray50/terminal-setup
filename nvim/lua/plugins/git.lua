@@ -1,20 +1,14 @@
 return {
 	{
-		"NeogitOrg/neogit",
-		dependencies = {
-			"nvim-lua/plenary.nvim",
-			"sindrets/diffview.nvim",
-			"nvim-telescope/telescope.nvim",
-		},
-		cmd = "Neogit",
-		opts = {
-			integrations = {
-				diffview = true,
-				telescope = true,
-			},
-		},
+		"tpope/vim-fugitive",
+		cmd = "Git",
 		keys = {
-			{ "<leader>gg", "<cmd>Neogit<cr>", desc = "Open Neogit" },
+			{ "<leader>gg", "<cmd>Git<cr>",       desc = "Git status (fugitive)" },
+			{ "<leader>gp", "<cmd>Git push<cr>",  desc = "Git push" },
+			{ "<leader>gl", "<cmd>Git pull<cr>",  desc = "Git pull" },
+			{ "<leader>gb", "<cmd>Git blame<cr>", desc = "Git blame" },
+			{ "<leader>gw", "<cmd>Gwrite<cr>",    desc = "Git stage file" },
+			{ "<leader>gr", "<cmd>Gread<cr>",     desc = "Git revert file" },
 		},
 	},
 	{

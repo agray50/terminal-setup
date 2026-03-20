@@ -677,7 +677,7 @@ setup_zsh_aliases() {
     aliases=$(cat <<'EOF'
 # Custom aliases
 alias nf='nvim $(fzf --preview "bat --color=always --style=numbers --line-range=:500 {}")'
-alias gg='nvim -c "Neogit"'
+alias gg='nvim -c "Git"'
 EOF
 )
 
