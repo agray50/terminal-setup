@@ -13,6 +13,7 @@ return {
 				{ "<leader>t", group = "toggle" },
 				-- gr* LSP builtins (Neovim 0.11)
 				{ "gr", group = "lsp" },
+				{ "<leader>u", group = "undotree" },
 			},
 		},
 		keys = {
