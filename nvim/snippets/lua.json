@@ -1,0 +1,17 @@
+{
+  "Module return": {
+    "prefix": "ret",
+    "body": ["return {", "\t$0", "}"],
+    "description": "Return a table (plugin spec or module)"
+  },
+  "Function": {
+    "prefix": "fn",
+    "body": ["local function ${1:name}(${2:args})", "\t${0:-- body}", "end"],
+    "description": "Local function"
+  },
+  "Print inspect": {
+    "prefix": "pi",
+    "body": ["print(vim.inspect(${1:value}))"],
+    "description": "Print with vim.inspect for debugging"
+  }
+}

@@ -9,7 +9,7 @@ return {
 		opts = {
 			keymap = {
 				preset = "none",
-				["<C-space>"] = { "show", "show_documentation", "hide_documentation" },
+				["<C-b>"] = { "show", "show_documentation", "hide_documentation" },
 				["<C-e>"] = { "hide" },
 				["<Tab>"] = { "select_next", "snippet_forward", "fallback" },
 				["<S-Tab>"] = { "select_prev", "snippet_backward", "fallback" },
@@ -28,6 +28,14 @@ return {
 
 			sources = {
 				default = { "lsp", "path", "snippets", "buffer" },
+				providers = {
+					snippets = {
+						opts = {
+							-- Load custom snippets from nvim/snippets/ alongside friendly-snippets
+							search_paths = { vim.fn.stdpath("config") .. "/snippets" },
+						},
+					},
+				},
 			},
 
 			fuzzy = { implementation = "prefer_rust_with_warning" },

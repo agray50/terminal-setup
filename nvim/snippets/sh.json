@@ -1,0 +1,17 @@
+{
+  "Shebang bash": {
+    "prefix": "bash",
+    "body": ["#!/usr/bin/env bash", "set -euo pipefail", "", "${0}"],
+    "description": "Bash shebang with strict mode"
+  },
+  "Check command exists": {
+    "prefix": "chkcmd",
+    "body": [
+      "if ! command -v ${1:cmd} &>/dev/null; then",
+      "\techo \"${1:cmd} not found\" >&2",
+      "\texit 1",
+      "fi"
+    ],
+    "description": "Check if a command exists"
+  }
+}

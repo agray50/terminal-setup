@@ -1,0 +1,21 @@
+{
+  "Error check": {
+    "prefix": "iferr",
+    "body": ["if err != nil {", "\t${0:return err}", "}"],
+    "description": "Standard Go error check"
+  },
+  "Printf": {
+    "prefix": "fp",
+    "body": ["fmt.Printf(\"${1:%v}\\n\", ${2:value})"],
+    "description": "fmt.Printf with newline"
+  },
+  "Http handler": {
+    "prefix": "handler",
+    "body": [
+      "func ${1:Name}(w http.ResponseWriter, r *http.Request) {",
+      "\t${0}",
+      "}"
+    ],
+    "description": "HTTP handler function"
+  }
+}

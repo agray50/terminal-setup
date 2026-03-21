@@ -1,0 +1,21 @@
+{
+  "Main guard": {
+    "prefix": "ifmain",
+    "body": ["if __name__ == '__main__':", "\t${0:pass}"],
+    "description": "Python main guard"
+  },
+  "Pdb breakpoint": {
+    "prefix": "pdb",
+    "body": ["import pdb; pdb.set_trace()"],
+    "description": "Drop into pdb debugger"
+  },
+  "Dataclass": {
+    "prefix": "dc",
+    "body": [
+      "@dataclass",
+      "class ${1:Name}:",
+      "\t${2:field}: ${3:type}"
+    ],
+    "description": "Dataclass definition (requires: from dataclasses import dataclass)"
+  }
+}
