@@ -26,6 +26,8 @@ return {
 				"helm_ls",
 				"terraformls",
 				"jdtls",
+				"gopls",
+				"bashls",
 			},
 		},
 		dependencies = {
@@ -45,6 +47,10 @@ return {
 				"eslint_d",
 				"checkstyle",
 				"yamllint",
+				"goimports",
+				"golangci-lint",
+					"shellcheck",
+				"shfmt",
 			},
 		},
 		dependencies = {

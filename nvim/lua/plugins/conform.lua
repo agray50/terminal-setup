@@ -17,6 +17,9 @@ return {
 				markdown = { "prettier" },
 				lua = { "stylua" },
 				python = { "isort", "black" },
+				go = { "goimports" },
+				sh = { "shfmt" },
+				bash = { "shfmt" },
 			},
 			format_on_save = {
 				lsp_format = "fallback",
@@ -31,6 +34,6 @@ return {
 				async = false,
 				timeout_ms = 1000,
 			})
-		end, { desc = "Format file or range (in visual mode)" })
+		end, { desc = "Format file or range" })
 	end,
 }

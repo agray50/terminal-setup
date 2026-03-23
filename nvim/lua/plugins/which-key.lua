@@ -8,11 +8,9 @@ return {
 				{ "<leader>f", group = "find (telescope)" },
 				{ "<leader>g", group = "git" },
 				{ "<leader>h", group = "hunk (gitsigns)" },
-				{ "<leader>l", group = "lsp" },
+				{ "<leader>k", group = "lsp" },
 				{ "<leader>m", group = "format" },
 				{ "<leader>t", group = "toggle" },
-				-- gr* LSP builtins (Neovim 0.11)
-				{ "gr", group = "lsp" },
 				{ "<leader>u", group = "undotree" },
 			},
 		},
