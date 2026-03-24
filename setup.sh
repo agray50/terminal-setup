@@ -1,804 +1,656 @@
 #!/bin/bash
-
 # =============================================================================
-# Cross-Platform Developer Environment Setup Script
+# Developer Environment Setup
 # =============================================================================
-# This script sets up zsh, oh-my-zsh, neovim, tmux, and related tools
-# Works on macOS and Linux (Ubuntu/Debian, Fedora/RHEL, Arch)
-# Safe to run multiple times (idempotent)
+# Supports: macOS, Ubuntu/Debian, Fedora/RHEL, Arch, and generic Linux
+# Uses binary releases where possible — minimal package manager dependency
+# Idempotent: safe to run multiple times
 # =============================================================================
 
-set -euo pipefail  # Exit on error, undefined vars, pipe failures
+set -euo pipefail
 
-# -----------------------------------------------------------------------------
-# Configuration
-# -----------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOCAL_BIN="${HOME}/.local/bin"
 BACKUP_DIR="${HOME}/.config-backups/$(date +%Y%m%d-%H%M%S)"
 MANUAL_STEPS=()
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
-
 # -----------------------------------------------------------------------------
-# Utility Functions
+# Logging
 # -----------------------------------------------------------------------------
 
-log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
+info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
+success() { echo -e "${GREEN}[OK]${NC} $1"; }
+warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
+error()   { echo -e "${RED}[ERROR]${NC} $1" >&2; }
+manual()  { echo -e "${CYAN}[MANUAL]${NC} $1"; MANUAL_STEPS+=("$1"); }
 
-log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
+# -----------------------------------------------------------------------------
+# System Detection
+# -----------------------------------------------------------------------------
 
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# Log a manual step both inline (with a [MANUAL] tag) and append to MANUAL_STEPS
-log_manual_step() {
-    local step="$1"
-    echo -e "${CYAN}[MANUAL]${NC} $step"
-    MANUAL_STEPS+=("$step")
-}
-
-# Detect operating system
-# Checks both ID and ID_LIKE so derivatives (e.g. Linux Mint) are handled correctly
 detect_os() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
         echo "macos"
-    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        if [ -f /etc/os-release ]; then
-            . /etc/os-release
-            # Build a combined string of ID and ID_LIKE for matching
-            local id_string="${ID:-} ${ID_LIKE:-}"
-            case "$id_string" in
-                *ubuntu*|*debian*)
-                    echo "debian"
-                    ;;
-                *fedora*|*rhel*|*centos*)
-                    echo "fedora"
-                    ;;
-                *arch*|*manjaro*)
-                    echo "arch"
-                    ;;
-                *)
-                    echo "linux"
-                    ;;
-            esac
-        else
-            echo "linux"
-        fi
+    elif [[ -f /etc/os-release ]]; then
+        local ids
+        ids="$(. /etc/os-release; echo "${ID:-} ${ID_LIKE:-}")"
+        case "$ids" in
+            *ubuntu*|*debian*) echo "debian" ;;
+            *fedora*|*rhel*|*centos*) echo "fedora" ;;
+            *arch*|*manjaro*) echo "arch" ;;
+            *) echo "linux" ;;
+        esac
     else
-        echo "unknown"
+        echo "linux"
     fi
 }
 
-# Check if command exists
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
+# Normalised arch: x86_64 or arm64 (used for neovim / k9s / jq / yq release filenames)
+detect_arch() {
+    case "$(uname -m)" in
+        x86_64)        echo "x86_64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        *)             uname -m ;;
+    esac
 }
 
-# Backup file or directory
+# Rust-style arch: x86_64 or aarch64 (used for ripgrep/fd/bat/eza release filenames)
+detect_arch_rust() {
+    case "$(uname -m)" in
+        x86_64)        echo "x86_64" ;;
+        aarch64|arm64) echo "aarch64" ;;
+        *)             uname -m ;;
+    esac
+}
+
+# Full Rust target triple for the current platform
+detect_rust_target() {
+    local arch os
+    arch=$(detect_arch_rust)
+    os=$(detect_os)
+    if [[ "$os" == "macos" ]]; then
+        echo "${arch}-apple-darwin"
+    else
+        echo "${arch}-unknown-linux-musl"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Utilities
+# -----------------------------------------------------------------------------
+
+command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+# Append line to file only if not already present
+add_line() {
+    grep -qF "$1" "$2" 2>/dev/null || echo "$1" >> "$2"
+}
+
+# Append block to file only if marker line is not already present
+add_block() {
+    local marker="$1" content="$2" file="$3"
+    grep -qF "$marker" "$file" 2>/dev/null || printf '\n%s\n' "$content" >> "$file"
+}
+
 backup_if_exists() {
-    local path="$1"
-    if [ -e "$path" ]; then
-        mkdir -p "$BACKUP_DIR"
-        local backup_path="$BACKUP_DIR/$(basename "$path")"
-        log_info "Backing up existing $path to $backup_path"
-        cp -r "$path" "$backup_path"
-        return 0
-    fi
-    return 1
+    [[ -e "$1" ]] || return 0
+    mkdir -p "$BACKUP_DIR"
+    cp -r "$1" "$BACKUP_DIR/$(basename "$1")"
+    info "Backed up $1"
 }
 
-# Add line to file if it doesn't exist (idempotent)
-add_line_to_file() {
-    local line="$1"
-    local file="$2"
-    if ! grep -qF "$line" "$file" 2>/dev/null; then
-        echo "$line" >> "$file"
-        return 0
-    fi
-    return 1
+# Resolve latest release tag from a GitHub repo (e.g. "v1.2.3" or "14.1.1")
+github_latest_tag() {
+    curl -fsLI "https://github.com/$1/releases/latest" -o /dev/null -w '%{url_effective}' 2>/dev/null \
+        | sed 's|.*/tag/||'
 }
 
-# Add block to file if marker doesn't exist (idempotent)
-# Uses printf to avoid misinterpreting escape sequences in content
-add_block_to_file() {
-    local marker="$1"
-    local content="$2"
-    local file="$3"
-
-    if ! grep -qF "$marker" "$file" 2>/dev/null; then
-        printf '\n%s\n' "$content" >> "$file"
-        return 0
+# In-place sed that works on both GNU (Linux) and BSD (macOS) sed
+sed_inplace() {
+    local expr="$1" file="$2"
+    if [[ "$(detect_os)" == "macos" ]]; then
+        sed -i '' "$expr" "$file"
+    else
+        sed -i "$expr" "$file"
     fi
-    return 1
 }
 
 # -----------------------------------------------------------------------------
-# Package Installation Functions
+# Package Manager (used only for tools without viable binary releases)
 # -----------------------------------------------------------------------------
 
-install_homebrew() {
-    if command_exists brew; then
-        log_success "Homebrew is already installed"
-        return 0
-    fi
-
-    log_info "Installing Homebrew..."
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-    # Add brew to PATH for the rest of this script (Apple Silicon path first, then Intel)
-    if [ -f /opt/homebrew/bin/brew ]; then
-        eval "$(/opt/homebrew/bin/brew shellenv)"
-    elif [ -f /usr/local/bin/brew ]; then
-        eval "$(/usr/local/bin/brew shellenv)"
-    fi
-
-    log_success "Homebrew installed"
-}
-
-install_package() {
-    local package="$1"
-    local os_type="$2"
-
-    case "$os_type" in
-        macos)
-            if ! brew list "$package" &>/dev/null; then
-                log_info "Installing $package via Homebrew..."
-                brew install "$package"
-            else
-                log_info "$package is already installed"
-            fi
-            ;;
-        debian)
-            # apt-get update is run once in main(); no per-package update here
-            if ! dpkg -l | grep -q "^ii  $package "; then
-                log_info "Installing $package via apt..."
-                sudo apt-get install -y "$package"
-            else
-                log_info "$package is already installed"
-            fi
-            ;;
-        fedora)
-            if ! rpm -q "$package" &>/dev/null; then
-                log_info "Installing $package via dnf..."
-                sudo dnf install -y "$package"
-            else
-                log_info "$package is already installed"
-            fi
-            ;;
-        arch)
-            if ! pacman -Q "$package" &>/dev/null; then
-                log_info "Installing $package via pacman..."
-                sudo pacman -S --noconfirm "$package"
-            else
-                log_info "$package is already installed"
-            fi
-            ;;
-        *)
-            log_warning "Unknown OS type. Please install $package manually."
-            log_manual_step "Install $package using your package manager"
-            ;;
+pkg_install() {
+    local pkg="$1" os="${2:-$(detect_os)}"
+    case "$os" in
+        macos)   brew install "$pkg" ;;
+        debian)  sudo apt-get install -y "$pkg" ;;
+        fedora)  sudo dnf install -y "$pkg" ;;
+        arch)    sudo pacman -S --noconfirm "$pkg" ;;
+        *)       manual "Install '$pkg' using your system package manager" ;;
     esac
 }
 
 # -----------------------------------------------------------------------------
-# Installation Functions
+# Binary Download Helpers
+# -----------------------------------------------------------------------------
+
+# Download a .tar.gz archive, find a named binary inside, install to LOCAL_BIN
+install_from_tarball() {
+    local url="$1" binary="$2"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    info "Downloading $binary..."
+    curl -fsSL "$url" -o "$tmpdir/archive.tar.gz"
+    tar -xzf "$tmpdir/archive.tar.gz" -C "$tmpdir"
+
+    local bin_path
+    bin_path=$(find "$tmpdir" -name "$binary" -type f | head -1)
+
+    if [[ -z "$bin_path" ]]; then
+        rm -rf "$tmpdir"
+        error "Could not find '$binary' in archive: $url"
+        return 1
+    fi
+
+    mkdir -p "$LOCAL_BIN"
+    cp "$bin_path" "$LOCAL_BIN/$binary"
+    chmod 755 "$LOCAL_BIN/$binary"
+    rm -rf "$tmpdir"
+    success "$binary installed"
+}
+
+# Download a single binary file directly to LOCAL_BIN
+install_from_binary_url() {
+    local url="$1" binary="$2"
+    info "Downloading $binary..."
+    mkdir -p "$LOCAL_BIN"
+    curl -fsSL "$url" -o "$LOCAL_BIN/$binary"
+    chmod 755 "$LOCAL_BIN/$binary"
+    success "$binary installed"
+}
+
+# -----------------------------------------------------------------------------
+# Shell
 # -----------------------------------------------------------------------------
 
 install_zsh() {
-    log_info "=== Installing zsh ==="
-
+    info "=== zsh ==="
     if command_exists zsh; then
-        log_success "zsh is already installed"
+        success "zsh already installed"
     else
-        local os_type
-        os_type=$(detect_os)
-        install_package "zsh" "$os_type"
+        pkg_install "zsh"
     fi
 
-    # Set zsh as default shell if not already
-    if [ "$SHELL" != "$(command -v zsh)" ]; then
-        log_info "Setting zsh as default shell..."
-        # Ensure zsh is in /etc/shells before calling chsh
-        local zsh_path
-        zsh_path="$(command -v zsh)"
-        if ! grep -qF "$zsh_path" /etc/shells; then
-            log_info "Adding $zsh_path to /etc/shells..."
-            echo "$zsh_path" | sudo tee -a /etc/shells >/dev/null
-        fi
+    local zsh_path
+    zsh_path=$(command -v zsh)
+    if [[ "$SHELL" != "$zsh_path" ]]; then
+        grep -qF "$zsh_path" /etc/shells || echo "$zsh_path" | sudo tee -a /etc/shells >/dev/null
         chsh -s "$zsh_path"
-        log_warning "You may need to log out and back in for shell change to take effect"
+        warn "Log out and back in for the shell change to take effect"
     fi
 }
 
 install_ohmyzsh() {
-    log_info "=== Installing oh-my-zsh ==="
-
-    if [ -d "${HOME}/.oh-my-zsh" ]; then
-        log_success "oh-my-zsh is already installed"
+    info "=== oh-my-zsh ==="
+    if [[ -d "${HOME}/.oh-my-zsh" ]]; then
+        success "oh-my-zsh already installed"
         return 0
     fi
-
-    log_info "Installing oh-my-zsh..."
-    # Use unattended install to avoid interactive prompts
     RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-    log_success "oh-my-zsh installed"
+    success "oh-my-zsh installed"
 }
 
 install_powerlevel10k() {
-    log_info "=== Installing powerlevel10k theme ==="
-
-    local p10k_dir="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
-
-    if [ -d "$p10k_dir" ]; then
-        log_success "powerlevel10k is already installed"
+    info "=== powerlevel10k ==="
+    local dir="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
+    if [[ ! -d "$dir" ]]; then
+        git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$dir"
+        success "powerlevel10k installed"
     else
-        log_info "Cloning powerlevel10k..."
-        git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$p10k_dir"
-        log_success "powerlevel10k installed"
+        success "powerlevel10k already installed"
     fi
 
-    # Update .zshrc to use powerlevel10k theme (idempotent)
-    if [ -f "${HOME}/.zshrc" ]; then
-        if ! grep -q '^ZSH_THEME="powerlevel10k/powerlevel10k"' "${HOME}/.zshrc"; then
-            log_info "Updating ZSH_THEME to powerlevel10k..."
-            if [[ "$OSTYPE" == "darwin"* ]]; then
-                sed -i '' 's/^ZSH_THEME="[^"]*"/ZSH_THEME="powerlevel10k\/powerlevel10k"/' "${HOME}/.zshrc"
-            else
-                sed -i 's/^ZSH_THEME="[^"]*"/ZSH_THEME="powerlevel10k\/powerlevel10k"/' "${HOME}/.zshrc"
-            fi
-        fi
+    if [[ -f "${HOME}/.zshrc" ]] && ! grep -q '^ZSH_THEME="powerlevel10k/powerlevel10k"' "${HOME}/.zshrc"; then
+        sed_inplace 's|^ZSH_THEME="[^"]*"|ZSH_THEME="powerlevel10k/powerlevel10k"|' "${HOME}/.zshrc"
     fi
 
-    # Copy p10k.zsh from repo if present; otherwise prompt the user to configure
-    if [ -f "${SCRIPT_DIR}/p10k.zsh" ]; then
-        log_info "Copying p10k.zsh from repo..."
+    if [[ -f "${SCRIPT_DIR}/p10k.zsh" ]]; then
         cp "${SCRIPT_DIR}/p10k.zsh" "${HOME}/.p10k.zsh"
-        log_success "p10k.zsh installed to ~/.p10k.zsh"
+        success "p10k.zsh installed"
     else
-        log_manual_step "Run 'p10k configure' to customise your prompt"
+        manual "Run 'p10k configure' to set up your prompt"
     fi
 
-    # Ensure the p10k source line is in .zshrc
-    add_line_to_file '[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh' "${HOME}/.zshrc" \
-        && log_success "p10k source line added to .zshrc"
+    add_line '[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh' "${HOME}/.zshrc"
 }
 
 install_zsh_plugins() {
-    log_info "=== Installing zsh plugins ==="
+    info "=== zsh plugins ==="
+    local custom="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins"
 
-    local os_type
-    os_type=$(detect_os)
-
-    if [[ "$os_type" == "macos" ]]; then
-        # Install via Homebrew and source directly (macOS)
-        if ! brew list zsh-syntax-highlighting &>/dev/null; then
-            log_info "Installing zsh-syntax-highlighting..."
-            brew install zsh-syntax-highlighting
-        else
-            log_success "zsh-syntax-highlighting is already installed"
-        fi
-
-        if ! brew list zsh-autosuggestions &>/dev/null; then
-            log_info "Installing zsh-autosuggestions..."
-            brew install zsh-autosuggestions
-        else
-            log_success "zsh-autosuggestions is already installed"
-        fi
-
-        local syntax_source='source $(brew --prefix)/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh'
-        local autosugg_source='source $(brew --prefix)/share/zsh-autosuggestions/zsh-autosuggestions.zsh'
-
-        add_line_to_file "$syntax_source" "${HOME}/.zshrc" && log_success "zsh-syntax-highlighting source added"
-        add_line_to_file "$autosugg_source" "${HOME}/.zshrc" && log_success "zsh-autosuggestions source added"
+    if [[ ! -d "$custom/zsh-syntax-highlighting" ]]; then
+        git clone https://github.com/zsh-users/zsh-syntax-highlighting.git "$custom/zsh-syntax-highlighting"
+        success "zsh-syntax-highlighting installed"
     else
-        # Install as oh-my-zsh custom plugins (Linux)
-        local syntax_dir="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting"
-        if [ ! -d "$syntax_dir" ]; then
-            log_info "Installing zsh-syntax-highlighting..."
-            git clone https://github.com/zsh-users/zsh-syntax-highlighting.git "$syntax_dir"
-            log_success "zsh-syntax-highlighting installed"
-        else
-            log_success "zsh-syntax-highlighting is already installed"
-        fi
+        success "zsh-syntax-highlighting already installed"
+    fi
 
-        local autosugg_dir="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions"
-        if [ ! -d "$autosugg_dir" ]; then
-            log_info "Installing zsh-autosuggestions..."
-            git clone https://github.com/zsh-users/zsh-autosuggestions "$autosugg_dir"
-            log_success "zsh-autosuggestions installed"
-        else
-            log_success "zsh-autosuggestions is already installed"
-        fi
+    if [[ ! -d "$custom/zsh-autosuggestions" ]]; then
+        git clone https://github.com/zsh-users/zsh-autosuggestions "$custom/zsh-autosuggestions"
+        success "zsh-autosuggestions installed"
+    else
+        success "zsh-autosuggestions already installed"
+    fi
 
-        if [ -f "${HOME}/.zshrc" ]; then
-            if ! grep -q "plugins=.*zsh-syntax-highlighting" "${HOME}/.zshrc"; then
-                sed -i 's/^plugins=(\(.*\))/plugins=(\1 zsh-syntax-highlighting)/' "${HOME}/.zshrc"
-            fi
-            if ! grep -q "plugins=.*zsh-autosuggestions" "${HOME}/.zshrc"; then
-                sed -i 's/^plugins=(\(.*\))/plugins=(\1 zsh-autosuggestions)/' "${HOME}/.zshrc"
-            fi
-        fi
+    if [[ -f "${HOME}/.zshrc" ]]; then
+        grep -q "zsh-syntax-highlighting" "${HOME}/.zshrc" || \
+            perl -i -pe 's/^(plugins=\()(.+)(\))/$1$2 zsh-syntax-highlighting$3/' "${HOME}/.zshrc"
+        grep -q "zsh-autosuggestions" "${HOME}/.zshrc" || \
+            perl -i -pe 's/^(plugins=\()(.+)(\))/$1$2 zsh-autosuggestions$3/' "${HOME}/.zshrc"
     fi
 }
 
-install_fzf() {
-    log_info "=== Installing fzf ==="
+# -----------------------------------------------------------------------------
+# CLI Tools — binary releases
+# -----------------------------------------------------------------------------
 
-    if command_exists fzf; then
-        log_success "fzf is already installed"
+install_fzf() {
+    info "=== fzf ==="
+    if [[ -d "${HOME}/.fzf" ]]; then
+        success "fzf already installed"
         return 0
     fi
-
-    local os_type
-    os_type=$(detect_os)
-
-    case "$os_type" in
-        macos)
-            install_package "fzf" "$os_type"
-            # Run the fzf install script with --no-update-rc so it doesn't touch
-            # shell rc files itself; we add the source line manually below.
-            if [ -f /opt/homebrew/opt/fzf/install ]; then
-                /opt/homebrew/opt/fzf/install --key-bindings --completion --no-update-rc
-            elif [ -f /usr/local/opt/fzf/install ]; then
-                /usr/local/opt/fzf/install --key-bindings --completion --no-update-rc
-            fi
-            # Manually add the fzf shell integration source line
-            add_line_to_file '[ -f ~/.fzf.zsh ] && source ~/.fzf.zsh' "${HOME}/.zshrc" \
-                && log_success "fzf shell integration added to .zshrc"
-            ;;
-        debian)
-            install_package "fzf" "$os_type"
-            # Debian/Ubuntu package does not add shell integration automatically
-            add_line_to_file '[ -f /usr/share/doc/fzf/examples/key-bindings.zsh ] && source /usr/share/doc/fzf/examples/key-bindings.zsh' "${HOME}/.zshrc" \
-                && log_success "fzf key-bindings added to .zshrc"
-            add_line_to_file '[ -f /usr/share/doc/fzf/examples/completion.zsh ] && source /usr/share/doc/fzf/examples/completion.zsh' "${HOME}/.zshrc" \
-                && log_success "fzf completion added to .zshrc"
-            ;;
-        fedora)
-            install_package "fzf" "$os_type"
-            add_line_to_file '[ -f /usr/share/fzf/shell/key-bindings.zsh ] && source /usr/share/fzf/shell/key-bindings.zsh' "${HOME}/.zshrc" \
-                && log_success "fzf key-bindings added to .zshrc"
-            ;;
-        arch)
-            install_package "fzf" "$os_type"
-            add_line_to_file '[ -f /usr/share/fzf/key-bindings.zsh ] && source /usr/share/fzf/key-bindings.zsh' "${HOME}/.zshrc" \
-                && log_success "fzf key-bindings added to .zshrc"
-            add_line_to_file '[ -f /usr/share/fzf/completion.zsh ] && source /usr/share/fzf/completion.zsh' "${HOME}/.zshrc" \
-                && log_success "fzf completion added to .zshrc"
-            ;;
-        *)
-            # Fallback to git installation
-            if [ ! -d "${HOME}/.fzf" ]; then
-                log_info "Installing fzf from git..."
-                git clone --depth 1 https://github.com/junegunn/fzf.git "${HOME}/.fzf"
-                "${HOME}/.fzf/install" --key-bindings --completion --no-update-rc
-            fi
-            add_line_to_file '[ -f ~/.fzf.zsh ] && source ~/.fzf.zsh' "${HOME}/.zshrc" \
-                && log_success "fzf shell integration added to .zshrc"
-            ;;
-    esac
-
-    log_success "fzf installed"
+    git clone --depth 1 https://github.com/junegunn/fzf.git "${HOME}/.fzf"
+    "${HOME}/.fzf/install" --key-bindings --completion --no-update-rc --no-bash --no-fish
+    add_line '[ -f ~/.fzf.zsh ] && source ~/.fzf.zsh' "${HOME}/.zshrc"
+    success "fzf installed"
 }
 
 install_neovim() {
-    log_info "=== Installing neovim ==="
-
+    info "=== neovim ==="
     if command_exists nvim; then
-        local nvim_version
-        nvim_version=$(nvim --version | head -n1)
-        log_success "neovim is already installed: $nvim_version"
+        success "neovim already installed: $(nvim --version | head -1)"
         return 0
     fi
 
-    local os_type
-    os_type=$(detect_os)
+    local os arch url
+    os=$(detect_os)
+    arch=$(detect_arch)
 
-    case "$os_type" in
-        macos)
-            install_package "neovim" "$os_type"
-            ;;
-        debian)
-            # apt on Ubuntu 22.04 ships neovim 0.7 which is too old; use snap instead
-            log_info "Installing neovim via snap (ensures a recent version)..."
-            if ! command_exists snapd && ! command_exists snap; then
-                log_info "Installing snapd first..."
-                sudo apt-get install -y snapd
-            fi
-            sudo snap install nvim --classic
-            log_success "neovim installed via snap"
-            ;;
-        fedora)
-            install_package "neovim" "$os_type"
-            ;;
-        arch)
-            install_package "neovim" "$os_type"
-            ;;
-        *)
-            log_warning "Please install neovim manually from:"
-            log_warning "https://github.com/neovim/neovim/blob/master/INSTALL.md"
-            log_manual_step "Install neovim from https://github.com/neovim/neovim/blob/master/INSTALL.md"
-            ;;
-    esac
+    if [[ "$os" == "macos" ]]; then
+        url="https://github.com/neovim/neovim/releases/latest/download/nvim-macos-${arch}.tar.gz"
+    else
+        url="https://github.com/neovim/neovim/releases/latest/download/nvim-linux-${arch}.tar.gz"
+    fi
+
+    local tmpdir; tmpdir=$(mktemp -d)
+    info "Downloading neovim..."
+    curl -fsSL "$url" -o "$tmpdir/nvim.tar.gz"
+    tar -xzf "$tmpdir/nvim.tar.gz" -C "$tmpdir"
+
+    local nvim_dir
+    nvim_dir=$(find "$tmpdir" -maxdepth 1 -type d -name "nvim*" | head -1)
+    mkdir -p "${HOME}/.local"
+    rm -rf "${HOME}/.local/nvim"
+    mv "$nvim_dir" "${HOME}/.local/nvim"
+    mkdir -p "$LOCAL_BIN"
+    ln -sf "${HOME}/.local/nvim/bin/nvim" "$LOCAL_BIN/nvim"
+    rm -rf "$tmpdir"
+    success "neovim installed"
 }
 
-install_tmux() {
-    log_info "=== Installing tmux ==="
+install_ripgrep() {
+    info "=== ripgrep ==="
+    command_exists rg && { success "ripgrep already installed"; return 0; }
 
-    if command_exists tmux; then
-        log_success "tmux is already installed"
+    local tag version target
+    tag=$(github_latest_tag "BurntSushi/ripgrep")
+    version="${tag#v}"
+    target=$(detect_rust_target)
+    install_from_tarball \
+        "https://github.com/BurntSushi/ripgrep/releases/download/${tag}/ripgrep-${version}-${target}.tar.gz" \
+        "rg"
+}
+
+install_fd() {
+    info "=== fd ==="
+    command_exists fd && { success "fd already installed"; return 0; }
+
+    local tag target
+    tag=$(github_latest_tag "sharkdp/fd")
+    target=$(detect_rust_target)
+    install_from_tarball \
+        "https://github.com/sharkdp/fd/releases/download/${tag}/fd-${tag}-${target}.tar.gz" \
+        "fd"
+}
+
+install_bat() {
+    info "=== bat ==="
+    command_exists bat && { success "bat already installed"; return 0; }
+
+    local tag target
+    tag=$(github_latest_tag "sharkdp/bat")
+    target=$(detect_rust_target)
+    install_from_tarball \
+        "https://github.com/sharkdp/bat/releases/download/${tag}/bat-${tag}-${target}.tar.gz" \
+        "bat"
+}
+
+install_eza() {
+    info "=== eza ==="
+    command_exists eza && { success "eza already installed"; return 0; }
+
+    local os arch url
+    os=$(detect_os)
+
+    # eza has no macOS binaries on GitHub releases — brew is the only option
+    if [[ "$os" == "macos" ]]; then
+        pkg_install "eza" "macos"
         return 0
     fi
 
-    local os_type
-    os_type=$(detect_os)
-    install_package "tmux" "$os_type"
+    # Linux: x86_64 has a musl build; aarch64 only has gnu
+    arch=$(detect_arch_rust)
+    if [[ "$arch" == "x86_64" ]]; then
+        url="https://github.com/eza-community/eza/releases/latest/download/eza_x86_64-unknown-linux-musl.tar.gz"
+    else
+        url="https://github.com/eza-community/eza/releases/latest/download/eza_${arch}-unknown-linux-gnu.tar.gz"
+    fi
+
+    install_from_tarball "$url" "eza"
+}
+
+install_jq() {
+    info "=== jq ==="
+    command_exists jq && { success "jq already installed"; return 0; }
+
+    local os arch jq_os jq_arch
+    os=$(detect_os)
+    arch=$(detect_arch)
+    [[ "$os" == "macos" ]] && jq_os="macos" || jq_os="linux"
+    [[ "$arch" == "x86_64" ]] && jq_arch="amd64" || jq_arch="arm64"
+
+    install_from_binary_url \
+        "https://github.com/jqlang/jq/releases/latest/download/jq-${jq_os}-${jq_arch}" \
+        "jq"
+}
+
+install_yq() {
+    info "=== yq ==="
+    command_exists yq && { success "yq already installed"; return 0; }
+
+    local os arch yq_os yq_arch
+    os=$(detect_os)
+    arch=$(detect_arch)
+    [[ "$os" == "macos" ]] && yq_os="darwin" || yq_os="linux"
+    [[ "$arch" == "x86_64" ]] && yq_arch="amd64" || yq_arch="arm64"
+
+    install_from_binary_url \
+        "https://github.com/mikefarah/yq/releases/latest/download/yq_${yq_os}_${yq_arch}" \
+        "yq"
+}
+
+install_k9s() {
+    info "=== k9s ==="
+    command_exists k9s && { success "k9s already installed"; return 0; }
+
+    local os arch k9s_os k9s_arch
+    os=$(detect_os)
+    arch=$(detect_arch)
+    [[ "$os" == "macos" ]] && k9s_os="Darwin" || k9s_os="Linux"
+    [[ "$arch" == "x86_64" ]] && k9s_arch="amd64" || k9s_arch="arm64"
+
+    install_from_tarball \
+        "https://github.com/derailed/k9s/releases/latest/download/k9s_${k9s_os}_${k9s_arch}.tar.gz" \
+        "k9s"
+}
+
+# -----------------------------------------------------------------------------
+# Terminal Multiplexer
+# -----------------------------------------------------------------------------
+
+install_tmux() {
+    info "=== tmux ==="
+    if command_exists tmux; then
+        success "tmux already installed"
+        return 0
+    fi
+    pkg_install "tmux"
 }
 
 install_tpm() {
-    log_info "=== Installing tmux plugin manager (tpm) ==="
-
-    local tpm_dir="${HOME}/.tmux/plugins/tpm"
-
-    if [ -d "$tpm_dir" ]; then
-        log_success "tpm is already installed"
+    info "=== tpm ==="
+    local dir="${HOME}/.tmux/plugins/tpm"
+    if [[ -d "$dir" ]]; then
+        success "tpm already installed"
         return 0
     fi
-
-    log_info "Cloning tpm..."
-    git clone https://github.com/tmux-plugins/tpm "$tpm_dir"
-    log_success "tpm installed"
-    # Headless plugin installation happens in setup_tmux_config after the config is in place
+    git clone https://github.com/tmux-plugins/tpm "$dir"
+    success "tpm installed"
 }
+
+# -----------------------------------------------------------------------------
+# Language Toolchains & Version Managers
+# -----------------------------------------------------------------------------
 
 install_rust() {
-    log_info "=== Installing Rust (rustup) ==="
-
+    info "=== Rust ==="
     if command_exists cargo; then
-        log_success "Rust/cargo is already installed"
+        success "Rust already installed"
         return 0
     fi
-
-    log_info "Installing Rust via rustup..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
-    log_success "Rust installed"
-
-    # Add cargo env source to .zshrc
-    add_line_to_file '. "$HOME/.cargo/env"' "${HOME}/.zshrc" \
-        && log_success "cargo env source added to .zshrc"
+    add_line '. "$HOME/.cargo/env"' "${HOME}/.zshrc"
+    success "Rust installed"
 }
 
-install_cli_tools() {
-    log_info "=== Installing additional CLI tools ==="
-
-    local os_type
-    os_type=$(detect_os)
-
-    # ripgrep - better grep, used by neovim telescope
-    if ! command_exists rg; then
-        log_info "Installing ripgrep..."
-        install_package "ripgrep" "$os_type"
+install_nvm() {
+    info "=== nvm ==="
+    if [[ -d "${HOME}/.nvm" ]]; then
+        success "nvm already installed"
     else
-        log_success "ripgrep is already installed"
-    fi
-
-    # fd - better find, used by neovim telescope
-    if ! command_exists fd; then
-        log_info "Installing fd..."
-        case "$os_type" in
-            debian)
-                install_package "fd-find" "$os_type"
-                # Create symlink so 'fd' works as expected
-                if [ ! -e "${HOME}/.local/bin/fd" ]; then
-                    mkdir -p "${HOME}/.local/bin"
-                    ln -s "$(command -v fdfind)" "${HOME}/.local/bin/fd" 2>/dev/null || true
-                fi
-                ;;
-            *)
-                install_package "fd" "$os_type"
-                ;;
-        esac
-    else
-        log_success "fd is already installed"
-    fi
-
-    # bat - better cat with syntax highlighting
-    # On Debian/Ubuntu the binary is installed as 'batcat'
-    if ! command_exists bat && ! command_exists batcat; then
-        log_info "Installing bat..."
-        case "$os_type" in
-            debian)
-                install_package "bat" "$os_type"
-                # Create symlink so 'bat' works
-                if ! command_exists bat && command_exists batcat; then
-                    mkdir -p "${HOME}/.local/bin"
-                    ln -sf "$(command -v batcat)" "${HOME}/.local/bin/bat" 2>/dev/null || true
-                    log_success "bat symlinked to ~/.local/bin/bat"
-                fi
-                ;;
-            *)
-                install_package "bat" "$os_type"
-                ;;
-        esac
-    else
-        log_success "bat is already installed"
-    fi
-
-    # git - should be installed but check anyway
-    if ! command_exists git; then
-        log_info "Installing git..."
-        install_package "git" "$os_type"
-    else
-        log_success "git is already installed"
-    fi
-
-    # xclip for Linux clipboard support in tmux
-    if [[ "$os_type" != "macos" ]]; then
-        if ! command_exists xclip; then
-            log_info "Installing xclip for tmux clipboard support..."
-            install_package "xclip" "$os_type"
-        else
-            log_success "xclip is already installed"
-        fi
-    fi
-
-    # Ensure ~/.local/bin is in PATH on Linux (needed for fd/bat symlinks)
-    if [[ "$os_type" != "macos" ]]; then
-        add_line_to_file 'export PATH="$HOME/.local/bin:$PATH"' "${HOME}/.zshrc" \
-            && log_success '~/.local/bin added to PATH in .zshrc'
-    fi
-}
-
-install_version_managers() {
-    log_info "=== Installing version managers (optional) ==="
-
-    # nvm - Node version manager
-    if [ ! -d "${HOME}/.nvm" ]; then
-        log_info "Installing nvm..."
         curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-        log_success "nvm installed"
-    else
-        log_success "nvm is already installed"
+        success "nvm installed"
     fi
 
-    # The nvm install script targets .bashrc (we run in bash); explicitly add
-    # the nvm init block to .zshrc as well so zsh sessions pick it up.
-    local nvm_block
-    nvm_block=$(cat <<'EOF'
-# nvm configuration
+    add_block "# nvm" "$(cat <<'EOF'
+# nvm
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
 EOF
-)
-    add_block_to_file "# nvm configuration" "$nvm_block" "${HOME}/.zshrc" \
-        && log_success "nvm init block added to .zshrc"
+)" "${HOME}/.zshrc"
+}
 
-    # pyenv - Python version manager
-    if ! command_exists pyenv; then
-        log_info "Installing pyenv..."
-        curl https://pyenv.run | bash
-        log_success "pyenv installed"
+install_pyenv() {
+    info "=== pyenv ==="
+    if command_exists pyenv; then
+        success "pyenv already installed"
     else
-        log_success "pyenv is already installed"
+        curl https://pyenv.run | bash
+        success "pyenv installed"
     fi
 
-    local pyenv_block
-    pyenv_block=$(cat <<'EOF'
-# pyenv configuration
+    add_block "# pyenv" "$(cat <<'EOF'
+# pyenv
 export PYENV_ROOT="$HOME/.pyenv"
 [[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
 eval "$(pyenv init -)"
 EOF
-)
-    add_block_to_file "# pyenv configuration" "$pyenv_block" "${HOME}/.zshrc" \
-        && log_success "pyenv init block added to .zshrc"
+)" "${HOME}/.zshrc"
+}
 
-    # tfenv - Terraform version manager
-    if ! command_exists tfenv; then
-        local os_type
-        os_type=$(detect_os)
-        if [[ "$os_type" == "macos" ]]; then
-            log_info "Installing tfenv via Homebrew..."
-            install_package "tfenv" "$os_type"
-        else
-            log_info "Installing tfenv from git..."
-            if [ ! -d "${HOME}/.tfenv" ]; then
-                git clone --depth=1 https://github.com/tfutils/tfenv.git "${HOME}/.tfenv"
-            fi
-            mkdir -p "${HOME}/.local/bin"
-            # Use a loop so the glob expands correctly
-            for bin in "${HOME}/.tfenv/bin/"*; do
-                local dest="${HOME}/.local/bin/$(basename "$bin")"
-                if [ ! -e "$dest" ]; then
-                    ln -s "$bin" "$dest"
-                fi
-            done
-        fi
-        log_success "tfenv installed"
+install_goenv() {
+    info "=== goenv ==="
+    if [[ -d "${HOME}/.goenv" ]]; then
+        success "goenv already installed"
     else
-        log_success "tfenv is already installed"
+        git clone --depth=1 https://github.com/go-nv/goenv.git "${HOME}/.goenv"
+        success "goenv installed"
     fi
+
+    add_block "# goenv" "$(cat <<'EOF'
+# goenv
+export GOENV_ROOT="$HOME/.goenv"
+export PATH="$GOENV_ROOT/bin:$PATH"
+eval "$(goenv init -)"
+EOF
+)" "${HOME}/.zshrc"
+}
+
+install_sdkman() {
+    info "=== SDKMAN ==="
+    if [[ -d "${HOME}/.sdkman" ]]; then
+        success "SDKMAN already installed"
+    else
+        curl -s "https://get.sdkman.io" | bash
+        success "SDKMAN installed"
+    fi
+
+    add_block "# SDKMAN" "$(cat <<'EOF'
+# SDKMAN
+export SDKMAN_DIR="$HOME/.sdkman"
+[[ -s "$HOME/.sdkman/bin/sdkman-init.sh" ]] && source "$HOME/.sdkman/bin/sdkman-init.sh"
+EOF
+)" "${HOME}/.zshrc"
+}
+
+install_tfenv() {
+    info "=== tfenv ==="
+    if command_exists tfenv; then
+        success "tfenv already installed"
+        return 0
+    fi
+
+    if [[ ! -d "${HOME}/.tfenv" ]]; then
+        git clone --depth=1 https://github.com/tfutils/tfenv.git "${HOME}/.tfenv"
+    fi
+
+    mkdir -p "$LOCAL_BIN"
+    for bin in "${HOME}/.tfenv/bin/"*; do
+        local dest="$LOCAL_BIN/$(basename "$bin")"
+        [[ ! -e "$dest" ]] && ln -s "$bin" "$dest"
+    done
+    success "tfenv installed"
 }
 
 # -----------------------------------------------------------------------------
-# Configuration Functions
+# Configuration
 # -----------------------------------------------------------------------------
 
-setup_zsh_env() {
-    log_info "=== Setting up zsh environment variables ==="
+setup_local_bin() {
+    mkdir -p "$LOCAL_BIN"
+    add_line 'export PATH="$HOME/.local/bin:$PATH"' "${HOME}/.zshrc"
+}
 
-    add_line_to_file 'export EDITOR="nvim"' "${HOME}/.zshrc" \
-        && log_success "EDITOR=nvim added to .zshrc"
+setup_zsh_env() {
+    add_line 'export EDITOR="nvim"' "${HOME}/.zshrc"
+    success "EDITOR set to nvim"
 }
 
 setup_zsh_keybindings() {
-    log_info "=== Setting up custom zsh keybindings ==="
-
-    local keybindings
-    keybindings=$(cat <<'EOF'
-# ------------------------------
-# Custom Zsh Keybindings Setup
-# ------------------------------
+    add_block "# Custom keybindings" "$(cat <<'EOF'
+# Custom keybindings
 bindkey '^B' backward-kill-line
 bindkey '^F' kill-line
 bindkey '^O' forward-word
 bindkey '^P' backward-word
 bindkey '^Y' clear-screen
 EOF
-)
-
-    if add_block_to_file "# Custom Zsh Keybindings Setup" "$keybindings" "${HOME}/.zshrc"; then
-        log_success "Custom keybindings added to .zshrc"
-    else
-        log_info "Custom keybindings already present in .zshrc"
-    fi
+)" "${HOME}/.zshrc"
+    success "Keybindings configured"
 }
 
 setup_zsh_aliases() {
-    log_info "=== Setting up zsh aliases ==="
-
-    local aliases
-    aliases=$(cat <<'EOF'
+    add_block "# Custom aliases" "$(cat <<'EOF'
 # Custom aliases
+alias ls='eza'
+alias ll='eza -lh --git'
+alias la='eza -lah --git'
+alias lt='eza --tree'
 alias nf='nvim $(fzf --preview "bat --color=always --style=numbers --line-range=:500 {}")'
 alias gg='nvim -c "Git"'
 EOF
-)
-
-    if add_block_to_file "# Custom aliases" "$aliases" "${HOME}/.zshrc"; then
-        log_success "Custom aliases added to .zshrc"
-    else
-        log_info "Custom aliases already present in .zshrc"
-    fi
+)" "${HOME}/.zshrc"
+    success "Aliases configured"
 }
 
 setup_tmux_autoattach() {
-    log_info "=== Setting up tmux auto-attach ==="
-
-    local block
-    block=$(cat <<'EOF'
-# Auto-attach or create tmux session
+    add_block "# tmux auto-attach" "$(cat <<'EOF'
+# tmux auto-attach
 if command -v tmux &>/dev/null && [ -z "$TMUX" ]; then
   tmux attach -t main 2>/dev/null || tmux new -s main
 fi
 EOF
-)
-
-    if add_block_to_file "# Auto-attach or create tmux session" "$block" "${HOME}/.zshrc"; then
-        log_success "tmux auto-attach added to .zshrc"
-    else
-        log_info "tmux auto-attach already present in .zshrc"
-    fi
+)" "${HOME}/.zshrc"
+    success "tmux auto-attach configured"
 }
 
 setup_nvim_config() {
-    log_info "=== Setting up neovim configuration ==="
+    info "=== Neovim config ==="
+    local target="${HOME}/.config/nvim"
+    local source="${SCRIPT_DIR}/nvim"
 
-    local nvim_config_dir="${HOME}/.config/nvim"
-    local nvim_source_dir="${SCRIPT_DIR}/nvim"
-
-    if [ ! -d "$nvim_source_dir" ]; then
-        log_error "Neovim config directory not found: $nvim_source_dir"
+    if [[ ! -d "$source" ]]; then
+        error "nvim config directory not found: $source"
         return 1
     fi
 
-    # Backup existing config
-    backup_if_exists "$nvim_config_dir"
+    backup_if_exists "$target"
 
-    # Create symlink to nvim config
-    if [ -L "$nvim_config_dir" ]; then
-        local current_target
-        current_target=$(readlink "$nvim_config_dir")
-        if [ "$current_target" = "$nvim_source_dir" ]; then
-            log_success "Neovim config is already symlinked correctly"
-        else
-            log_info "Removing old symlink..."
-            rm "$nvim_config_dir"
-            ln -s "$nvim_source_dir" "$nvim_config_dir"
-            log_success "Neovim config symlinked"
-        fi
-    elif [ -d "$nvim_config_dir" ]; then
-        log_info "Removing existing directory..."
-        rm -rf "$nvim_config_dir"
-        ln -s "$nvim_source_dir" "$nvim_config_dir"
-        log_success "Neovim config symlinked"
+    if [[ -L "$target" && "$(readlink "$target")" == "$source" ]]; then
+        success "Neovim config symlink already correct"
     else
-        log_info "Creating symlink: $nvim_config_dir -> $nvim_source_dir"
-        ln -s "$nvim_source_dir" "$nvim_config_dir"
-        log_success "Neovim config symlinked"
+        rm -rf "$target"
+        ln -s "$source" "$target"
+        success "Neovim config symlinked: $target -> $source"
     fi
 
-    # Headlessly install / sync Lazy.nvim plugins
     if command_exists nvim; then
-        log_info "Running Lazy.nvim headless sync..."
-        nvim --headless "+Lazy! sync" +qa || log_warning "Lazy.nvim sync encountered an issue; open nvim to resolve"
-        log_success "Lazy.nvim sync complete"
+        info "Running lazy.nvim headless sync..."
+        nvim --headless "+Lazy! sync" +qa 2>/dev/null \
+            || warn "Lazy sync had issues; open nvim to resolve"
+        success "Lazy.nvim sync complete"
     else
-        log_warning "nvim not found in PATH; skipping Lazy.nvim sync"
+        warn "nvim not in PATH yet; skipping Lazy sync (re-run setup after shell reload)"
     fi
 }
 
 setup_tmux_config() {
-    log_info "=== Setting up tmux configuration ==="
+    info "=== tmux config ==="
+    local target="${HOME}/.tmux.conf"
+    local source="${SCRIPT_DIR}/tmux/tmux.conf"
 
-    local tmux_conf="${HOME}/.tmux.conf"
-    local tmux_source="${SCRIPT_DIR}/tmux/tmux.conf"
-
-    if [ ! -f "$tmux_source" ]; then
-        log_error "Tmux config file not found: $tmux_source"
+    if [[ ! -f "$source" ]]; then
+        error "tmux config not found: $source"
         return 1
     fi
 
-    # Backup existing config
-    backup_if_exists "$tmux_conf"
+    backup_if_exists "$target"
+    cp "$source" "$target"
 
-    # Copy tmux config
-    log_info "Copying tmux config..."
-    cp "$tmux_source" "$tmux_conf"
-
-    # Adjust clipboard config based on OS
-    local os_type
-    os_type=$(detect_os)
-    if [[ "$os_type" == "macos" ]]; then
-        log_info "tmux.conf is already configured for macOS (pbcopy)"
-    else
-        log_info "Updating tmux.conf for Linux (xclip)..."
-        # Always use GNU sed on Linux; no inner macOS check needed here
-        sed -i 's/^bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "pbcopy"/# bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "pbcopy"/' "$tmux_conf"
-        sed -i 's/^# bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "xclip -in -selection clipboard"/bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "xclip -in -selection clipboard"/' "$tmux_conf"
+    if [[ "$(detect_os)" != "macos" ]]; then
+        sed -i 's|copy-pipe-and-cancel "pbcopy"|copy-pipe-and-cancel "xclip -in -selection clipboard"|' "$target"
+        command_exists xclip || pkg_install "xclip"
     fi
 
-    log_success "Tmux config installed"
+    success "tmux config installed"
 
-    # Headlessly install tmux plugins via tpm
     local tpm_install="${HOME}/.tmux/plugins/tpm/bin/install_plugins"
-    if [ -x "$tpm_install" ]; then
-        log_info "Installing tmux plugins headlessly..."
-        "$tpm_install" || log_warning "tpm install_plugins encountered an issue"
-        log_success "Tmux plugins installed"
+    if [[ -x "$tpm_install" ]]; then
+        "$tpm_install" || warn "tpm plugin install had issues"
+        success "tmux plugins installed"
     else
-        log_warning "tpm install script not found; plugins may not be installed yet"
+        warn "tpm not ready; open tmux and press prefix+I to install plugins"
     fi
 }
 
 # -----------------------------------------------------------------------------
-# Main Installation Flow
+# Main
 # -----------------------------------------------------------------------------
 
 main() {
@@ -807,31 +659,27 @@ main() {
     echo "============================================="
     echo ""
 
-    local os_type
-    os_type=$(detect_os)
-    log_info "Detected OS: $os_type"
+    local os; os=$(detect_os)
+    info "OS: $os | Arch: $(detect_arch)"
     echo ""
 
-    # --- macOS: ensure Homebrew is present before anything else ---
-    if [[ "$os_type" == "macos" ]]; then
-        install_homebrew
-    fi
+    setup_local_bin
 
-    # --- Linux: run a single package-manager update before all installs ---
-    if [[ "$os_type" == "debian" ]]; then
-        log_info "Running apt-get update..."
-        sudo apt-get update -qq
-    elif [[ "$os_type" == "fedora" ]]; then
-        log_info "Running dnf check-update..."
-        sudo dnf check-update -q || true
-    elif [[ "$os_type" == "arch" ]]; then
-        log_info "Running pacman -Sy..."
-        sudo pacman -Sy --noconfirm
-    fi
+    case "$os" in
+        macos)
+            command_exists brew || {
+                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+                [[ -f /opt/homebrew/bin/brew ]] \
+                    && eval "$(/opt/homebrew/bin/brew shellenv)" \
+                    || eval "$(/usr/local/bin/brew shellenv)"
+            }
+            ;;
+        debian)  sudo apt-get update -qq ;;
+        fedora)  sudo dnf check-update -q || true ;;
+    esac
 
     echo ""
-
-    # --- Install core tools ---
+    info "--- Installing tools ---"
     install_zsh
     install_ohmyzsh
     install_powerlevel10k
@@ -841,14 +689,21 @@ main() {
     install_tmux
     install_tpm
     install_rust
-    install_cli_tools
-
-    # --- Install version managers (optional but recommended) ---
-    install_version_managers
+    install_ripgrep
+    install_fd
+    install_bat
+    install_eza
+    install_jq
+    install_yq
+    install_k9s
+    install_nvm
+    install_pyenv
+    install_goenv
+    install_sdkman
+    install_tfenv
 
     echo ""
-
-    # --- Setup configurations ---
+    info "--- Configuring dotfiles ---"
     setup_zsh_env
     setup_zsh_keybindings
     setup_zsh_aliases
@@ -858,51 +713,44 @@ main() {
 
     echo ""
     echo "============================================="
-    log_success "Setup Complete!"
+    success "Setup complete!"
     echo "============================================="
     echo ""
 
-    # Show backup location if any backups were made
-    if [ -d "$BACKUP_DIR" ]; then
-        log_info "Backups saved to: $BACKUP_DIR"
-        echo ""
-    fi
+    [[ -d "$BACKUP_DIR" ]] && info "Backups saved to: $BACKUP_DIR"
 
-    # Show accumulated manual steps (logged inline already; this is the summary)
-    if [ ${#MANUAL_STEPS[@]} -gt 0 ]; then
-        echo "============================================="
-        echo "  MANUAL STEPS REQUIRED (SUMMARY)"
-        echo "============================================="
+    if [[ ${#MANUAL_STEPS[@]} -gt 0 ]]; then
         echo ""
+        echo "  MANUAL STEPS REQUIRED:"
         for step in "${MANUAL_STEPS[@]}"; do
             echo "  • $step"
         done
         echo ""
     fi
 
-    echo "============================================="
-    echo "  POST-INSTALL CHECKLIST"
-    echo "============================================="
-    echo ""
-    echo "  1. Install a Nerd Font for proper icon display:"
-    echo "     https://github.com/ryanoasis/nerd-fonts"
-    echo "     Recommended: FiraCode Nerd Font, JetBrainsMono Nerd Font"
-    echo ""
-    echo "  2. Configure your terminal to use the Nerd Font"
-    echo ""
-    echo "  3. Install Catppuccin theme for your terminal:"
-    echo "     • iTerm2:        https://github.com/catppuccin/iterm"
-    echo "     • GNOME Terminal: https://github.com/catppuccin/gnome-terminal"
-    echo "     • Alacritty:     https://github.com/catppuccin/alacritty"
-    echo ""
-    echo "  4. Reload your shell configuration:"
-    echo "     source ~/.zshrc"
-    echo ""
-    echo "============================================="
-    echo ""
+    cat <<'CHECKLIST'
 
-    log_info "Enjoy your new development environment!"
+  POST-INSTALL CHECKLIST
+  ─────────────────────
+  1. Install a Nerd Font: https://github.com/ryanoasis/nerd-fonts
+     Recommended: JetBrainsMono Nerd Font
+
+  2. Set your terminal to use the Nerd Font
+
+  3. Install Catppuccin theme for your terminal:
+     • iTerm2: https://github.com/catppuccin/iterm
+     • GNOME:  https://github.com/catppuccin/gnome-terminal
+
+  4. Install Java via SDKMAN (after shell reload):
+     sdk install java
+
+  5. Install a Go version via goenv (after shell reload):
+     goenv install <version> && goenv global <version>
+
+  6. Reload your shell:
+     source ~/.zshrc
+
+CHECKLIST
 }
 
-# Run main function
 main "$@"

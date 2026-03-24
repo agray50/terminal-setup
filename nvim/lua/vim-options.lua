@@ -27,8 +27,8 @@ vim.opt.splitbelow = true
 vim.opt.scrolloff = 8
 vim.opt.swapfile = false
 vim.opt.undofile = true
-vim.o.mouse = "a"
-vim.o.clipboard = "unnamedplus"
+vim.opt.mouse = "a"
+vim.opt.clipboard = "unnamedplus"
 
 -- Window navigation (shared with vim-tmux-navigator)
 vim.keymap.set("n", "<C-h>", ":wincmd h<CR>", { desc = "Move to window left" })
@@ -49,9 +49,23 @@ vim.keymap.set("n", "N", "Nzzzv", { desc = "Prev search result, center cursor" }
 vim.keymap.set("x", "<leader>p", [["_dP]], { desc = "Paste without yanking replaced text" })
 vim.keymap.set({ "n", "v" }, "<leader>y", [["+y]], { desc = "Yank to system clipboard" })
 vim.keymap.set("n", "<leader>Y", [["+Y]], { desc = "Yank line to system clipboard" })
-vim.keymap.set({ "n", "v" }, "<leader>d", '"_d', { desc = "Delete without yanking" })
-vim.api.nvim_set_keymap("v", "<LeftRelease>", '"+y', { noremap = true, silent = true, desc = "Yank visual selection to system clipboard on mouse release" })
+vim.keymap.set({ "n", "v" }, "<leader>X", '"_d', { desc = "Delete without yanking" })
+vim.keymap.set("v", "<LeftRelease>", '"+y', { noremap = true, silent = true, desc = "Yank visual selection on mouse release" })
+
+-- Insert mode
+vim.keymap.set("i", "jk", "<Esc>", { desc = "Exit insert mode" })
 
 -- Utility
+vim.keymap.set("n", "<leader>Q", function()
+	pcall(function() require("dapui").close() end)
+	pcall(vim.cmd, "DiffviewClose")
+	pcall(vim.cmd, "Neotree close")
+	pcall(vim.cmd, "UndotreeHide")
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		if vim.bo[buf].filetype == "fugitive" then
+			pcall(vim.api.nvim_buf_delete, buf, { force = true })
+		end
+	end
+end, { desc = "Close all tool panels" })
 vim.keymap.set("n", "<leader>s", [[:%s/\<<C-r><C-w>\>/<C-r><C-w>/gI<Left><Left><Left>]], { desc = "Search and replace word under cursor" })
 vim.keymap.set("n", "<leader>x", "<cmd>!chmod +x %<CR>", { silent = true, desc = "Make current file executable" })

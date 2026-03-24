@@ -5,6 +5,7 @@ return {
 		opts = {
 			spec = {
 				-- Leader groups
+				{ "<leader>d", group = "debug" },
 				{ "<leader>f", group = "find (telescope)" },
 				{ "<leader>g", group = "git" },
 				{ "<leader>h", group = "hunk (gitsigns)" },

@@ -6,10 +6,7 @@ return {
 
 		lint.linters_by_ft = {
 			python = { "pylint" },
-			javascript = { "eslint_d" },
-			typescript = { "eslint_d" },
-			javascriptreact = { "eslint_d" },
-			typescriptreact = { "eslint_d" },
+			-- JS/TS: eslint LSP handles diagnostics + code actions; no separate linter needed
 			yaml = { "yamllint" },
 			go = { "golangci_lint" },
 			sh = { "shellcheck" },

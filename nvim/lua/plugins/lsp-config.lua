@@ -20,116 +20,51 @@ return {
 				},
 			})
 
-	
+			-- Enable schema store so yamlls recognises Kubernetes, GitHub Actions, etc.
+			vim.lsp.config("yamlls", {
+				settings = {
+					yaml = {
+						schemaStore = { enable = true },
+					},
+				},
+			})
+
 			vim.api.nvim_create_autocmd("LspAttach", {
 				callback = function(ev)
 					local opts = { noremap = true, silent = true, buffer = ev.buf }
 
+					local function map(key, action, desc)
+						vim.keymap.set("n", key, action, vim.tbl_extend("force", opts, { desc = desc }))
+					end
+
 					-- Navigation
-					vim.keymap.set(
-						"n",
-						"<leader>kd",
-						"<cmd>Telescope lsp_definitions<CR>",
-						vim.tbl_extend("force", opts, { desc = "󰈮 Go to definition" })
-					)
-					vim.keymap.set(
-						"n",
-						"<leader>kD",
-						vim.lsp.buf.declaration,
-						vim.tbl_extend("force", opts, { desc = "󰈮 Go to declaration" })
-					)
-					vim.keymap.set(
-						"n",
-						"<leader>kr",
-						"<cmd>Telescope lsp_references<CR>",
-						vim.tbl_extend("force", opts, { desc = "󰈇 References" })
-					)
-					vim.keymap.set(
-						"n",
-						"<leader>ki",
-						"<cmd>Telescope lsp_implementations<CR>",
-						vim.tbl_extend("force", opts, { desc = "󰡱 Implementation" })
-					)
-					vim.keymap.set(
-						"n",
-						"<leader>kt",
-						"<cmd>Telescope lsp_type_definitions<CR>",
-						vim.tbl_extend("force", opts, { desc = "󰜢 Type definition" })
-					)
-					vim.keymap.set(
-						"n",
-						"<leader>ks",
-						"<cmd>Telescope lsp_document_symbols<CR>",
-						vim.tbl_extend("force", opts, { desc = "󰫧 Document symbols" })
-					)
-					vim.keymap.set(
-						"n",
-						"<leader>kS",
-						"<cmd>Telescope lsp_workspace_symbols<CR>",
-						vim.tbl_extend("force", opts, { desc = "󰫧 Workspace symbols" })
-					)
+					map("<leader>kd", "<cmd>Telescope lsp_definitions<CR>",    "󰈮 Go to definition")
+					map("<leader>kD", vim.lsp.buf.declaration,                 "󰈮 Go to declaration")
+					map("<leader>kr", "<cmd>Telescope lsp_references<CR>",     "󰈇 References")
+					map("<leader>ki", "<cmd>Telescope lsp_implementations<CR>","󰡱 Implementation")
+					map("<leader>kt", "<cmd>Telescope lsp_type_definitions<CR>","󰜢 Type definition")
+					map("<leader>ks", "<cmd>Telescope lsp_document_symbols<CR>","󰫧 Document symbols")
+					map("<leader>kS", "<cmd>Telescope lsp_workspace_symbols<CR>","󰫧 Workspace symbols")
 
 					-- Actions
-					vim.keymap.set(
-						"n",
-						"<leader>ka",
-						vim.lsp.buf.code_action,
-						vim.tbl_extend("force", opts, { desc = "󰅯 Code action" })
-					)
-					vim.keymap.set(
-						"n",
-						"<leader>kn",
-						vim.lsp.buf.rename,
-						vim.tbl_extend("force", opts, { desc = "󰑕 Rename symbol" })
-					)
+					map("<leader>ka", vim.lsp.buf.code_action,  "󰅯 Code action")
+					map("<leader>kn", vim.lsp.buf.rename,       "󰑕 Rename symbol")
 
 					-- Diagnostics
-					vim.keymap.set(
-						"n",
-						"<leader>ke",
-						"<cmd>Telescope diagnostics bufnr=0<CR>",
-						vim.tbl_extend("force", opts, { desc = "󰅚 Buffer diagnostics" })
-					)
-					vim.keymap.set(
-						"n",
-						"<leader>kE",
-						"<cmd>Telescope diagnostics<CR>",
-						vim.tbl_extend("force", opts, { desc = "󰅚 Workspace diagnostics" })
-					)
-					vim.keymap.set(
-						"n",
-						"<leader>kl",
-						vim.diagnostic.open_float,
-						vim.tbl_extend("force", opts, { desc = "󰋽 Line diagnostic float" })
-					)
+					map("<leader>ke", "<cmd>Telescope diagnostics bufnr=0<CR>", "󰅚 Buffer diagnostics")
+					map("<leader>kE", "<cmd>Telescope diagnostics<CR>",         "󰅚 Workspace diagnostics")
+					map("<leader>kl", vim.diagnostic.open_float,                "󰋽 Line diagnostic float")
 
 					-- Hover / info
-					vim.keymap.set(
-						"n",
-						"<leader>kk",
-						vim.lsp.buf.hover,
-						vim.tbl_extend("force", opts, { desc = "󰈙 Hover" })
-					)
-					vim.keymap.set(
-						"n",
-						"<leader>kh",
-						vim.lsp.buf.signature_help,
-						vim.tbl_extend("force", opts, { desc = "󰊕 Signature help" })
-					)
+					map("<leader>kk", vim.lsp.buf.hover,          "󰈙 Hover")
+					map("<leader>kh", vim.lsp.buf.signature_help, "󰊕 Signature help")
+					map("<leader>kI", "<cmd>LspInfo<CR>",         "󰋼 LSP info")
 
 					-- LSP management
 					vim.keymap.set("n", "<leader>kR", function()
 						vim.lsp.stop_client(vim.lsp.get_clients({ bufnr = 0 }))
-						vim.defer_fn(function()
-							vim.cmd("edit")
-						end, 100)
+						vim.defer_fn(function() vim.cmd("edit") end, 100)
 					end, vim.tbl_extend("force", opts, { desc = "󰑓 Restart LSP" }))
-					vim.keymap.set(
-						"n",
-						"<leader>kI",
-						"<cmd>LspInfo<CR>",
-						vim.tbl_extend("force", opts, { desc = "󰋼 LSP info" })
-					)
 				end,
 			})
 

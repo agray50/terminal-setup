@@ -13,9 +13,14 @@ return {
 	},
 	{
 		"mason-org/mason-lspconfig.nvim",
+		dependencies = {
+			{ "mason-org/mason.nvim", opts = {} },
+			"neovim/nvim-lspconfig",
+		},
 		opts = {
 			ensure_installed = {
 				"ts_ls",
+				"jsonls",
 				"html",
 				"cssls",
 				"tailwindcss",
@@ -30,31 +35,30 @@ return {
 				"bashls",
 			},
 		},
-		dependencies = {
-			{ "mason-org/mason.nvim", opts = {} },
-			"neovim/nvim-lspconfig",
-		},
 	},
 	{
 		"WhoIsSethDaniel/mason-tool-installer.nvim",
+		dependencies = { "mason-org/mason.nvim" },
 		opts = {
 			ensure_installed = {
+				-- Formatters
 				"prettier",
 				"stylua",
 				"isort",
 				"black",
-				"pylint",
-				"eslint_d",
-				"checkstyle",
-				"yamllint",
 				"goimports",
-				"golangci-lint",
-					"shellcheck",
 				"shfmt",
+				-- Linters
+				"pylint",
+				"yamllint",
+				"golangci-lint",
+				"shellcheck",
+				-- DAP adapters
+				"debugpy",
+				"delve",
+				"js-debug-adapter",
+				"bash-debug-adapter",
 			},
-		},
-		dependencies = {
-			"williamboman/mason.nvim",
 		},
 	},
 }
