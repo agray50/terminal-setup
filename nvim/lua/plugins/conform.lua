@@ -18,6 +18,7 @@ return {
 				lua = { "stylua" },
 				python = { "isort", "black" },
 				go = { "goimports" },
+				rust = { "rustfmt" },
 				terraform = { "terraform_fmt" },
 				tf = { "terraform_fmt" },
 				hcl = { "terraform_fmt" },

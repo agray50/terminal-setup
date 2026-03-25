@@ -260,14 +260,23 @@ install_zsh_plugins() {
 
 install_fzf() {
     info "=== fzf ==="
-    if [[ -d "${HOME}/.fzf" ]]; then
+    if [[ ! -d "${HOME}/.fzf" ]]; then
+        git clone --depth 1 https://github.com/junegunn/fzf.git "${HOME}/.fzf"
+        # --bin: download prebuilt binary only; shell integration handled below
+        "${HOME}/.fzf/install" --bin
+        success "fzf installed"
+    else
         success "fzf already installed"
-        return 0
     fi
-    git clone --depth 1 https://github.com/junegunn/fzf.git "${HOME}/.fzf"
-    "${HOME}/.fzf/install" --key-bindings --completion --no-update-rc --no-bash --no-fish
-    add_line '[ -f ~/.fzf.zsh ] && source ~/.fzf.zsh' "${HOME}/.zshrc"
-    success "fzf installed"
+
+    # Ensure binary is reachable from LOCAL_BIN
+    mkdir -p "$LOCAL_BIN"
+    ln -sf "${HOME}/.fzf/bin/fzf" "$LOCAL_BIN/fzf"
+
+    # Remove legacy fzf shell integration lines (replaced by explicit functions in setup_zsh_functions)
+    if [[ -f "${HOME}/.zshrc" ]]; then
+        perl -i -ne 'print unless /\[ -f ~\/\.fzf\.zsh \]/ || /eval "\$\(fzf --zsh\)"/' "${HOME}/.zshrc"
+    fi
 }
 
 install_neovim() {
@@ -441,11 +450,12 @@ install_rust() {
     info "=== Rust ==="
     if command_exists cargo; then
         success "Rust already installed"
-        return 0
+    else
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+        success "Rust installed"
     fi
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+    # Always ensure cargo env is sourced — rustup uses --no-modify-path so won't add it itself
     add_line '. "$HOME/.cargo/env"' "${HOME}/.zshrc"
-    success "Rust installed"
 }
 
 install_nvm() {
@@ -457,7 +467,9 @@ install_nvm() {
         success "nvm installed"
     fi
 
-    add_block "# nvm" "$(cat <<'EOF'
+    # nvm's installer may have already written its init block to .zshrc (when $SHELL=zsh);
+    # check for the sourced script rather than our marker to avoid duplicates
+    grep -qF 'nvm.sh' "${HOME}/.zshrc" 2>/dev/null || add_block "# nvm" "$(cat <<'EOF'
 # nvm
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
@@ -511,7 +523,9 @@ install_sdkman() {
         success "SDKMAN installed"
     fi
 
-    add_block "# SDKMAN" "$(cat <<'EOF'
+    # SDKMAN's installer may have already written its init block to .zshrc;
+    # check for the sourced script rather than our marker to avoid duplicates
+    grep -qF 'sdkman-init.sh' "${HOME}/.zshrc" 2>/dev/null || add_block "# SDKMAN" "$(cat <<'EOF'
 # SDKMAN
 export SDKMAN_DIR="$HOME/.sdkman"
 [[ -s "$HOME/.sdkman/bin/sdkman-init.sh" ]] && source "$HOME/.sdkman/bin/sdkman-init.sh"
@@ -557,8 +571,8 @@ setup_zsh_keybindings() {
 # Custom keybindings
 bindkey '^B' backward-kill-line
 bindkey '^F' kill-line
-bindkey '^O' forward-word
-bindkey '^P' backward-word
+bindkey '^P' forward-word
+bindkey '^O' backward-word
 bindkey '^Y' clear-screen
 EOF
 )" "${HOME}/.zshrc"
@@ -568,15 +582,91 @@ EOF
 setup_zsh_aliases() {
     add_block "# Custom aliases" "$(cat <<'EOF'
 # Custom aliases
-alias ls='eza'
-alias ll='eza -lh --git'
-alias la='eza -lah --git'
-alias lt='eza --tree'
+
+# eza — better ls
+alias ls='eza --icons'
+alias ll='eza -lh --git --icons'
+alias la='eza -lah --git --icons'
+alias lt='eza --tree --icons'
+alias l2='eza --tree --level=2 --icons'
+
+# bat — syntax-highlighted cat (no pager for short output)
+alias cat='bat --paging=never'
+
+# JSON / YAML pretty-print
+alias json='jq .'
+alias yaml='yq .'
+
+# tmux
+alias ta='tmux attach -t'
+alias tl='tmux ls'
+alias tn='tmux new -s'
+alias tk='tmux kill-session -t'
+
+# terraform
+alias tf='terraform'
+alias tfi='terraform init'
+alias tfp='terraform plan'
+alias tfa='terraform apply'
+alias tfd='terraform destroy'
+
+# neovim + fzf
 alias nf='nvim $(fzf --preview "bat --color=always --style=numbers --line-range=:500 {}")'
 alias gg='nvim -c "Git"'
 EOF
 )" "${HOME}/.zshrc"
     success "Aliases configured"
+}
+
+setup_zsh_functions() {
+    add_block "# Custom shell functions" "$(cat <<'EOF'
+# Custom shell functions
+
+# fh — fuzzy history search; selected command is loaded into the prompt for editing
+fh() {
+    print -z $(fc -ln 1 | fzf --tac --no-sort)
+}
+
+# fcd — fuzzy cd into any subdirectory
+fcd() {
+    local dir
+    dir=$(fd --type d --hidden --exclude .git 2>/dev/null \
+        | fzf --preview 'eza --tree --level=2 --icons {}')
+    [[ -n "$dir" ]] && cd "$dir"
+}
+
+# fgb — fuzzy git branch checkout
+fgb() {
+    local branch
+    branch=$(git branch --all 2>/dev/null | grep -v HEAD \
+        | fzf | sed 's|.*remotes/origin/||' | tr -d ' ')
+    [[ -n "$branch" ]] && git checkout "$branch"
+}
+
+# fkill — fuzzy process kill
+fkill() {
+    local pid
+    pid=$(ps -ef | sed 1d \
+        | fzf -m --header='Select process(es) to kill' \
+        | awk '{print $2}')
+    [[ -n "$pid" ]] && echo "$pid" | xargs kill -9
+}
+
+# frg — ripgrep through file contents, preview with bat, open result in nvim
+frg() {
+    local result file line
+    result=$(rg --color=always --line-number --no-heading "${@:-.}" \
+        | fzf --ansi --delimiter=: \
+              --preview 'bat --color=always {1} --highlight-line {2}' \
+              --preview-window 'right:60%:+{2}-5')
+    [[ -z "$result" ]] && return
+    file=$(echo "$result" | cut -d: -f1)
+    line=$(echo "$result" | cut -d: -f2)
+    nvim +"$line" "$file"
+}
+EOF
+)" "${HOME}/.zshrc"
+    success "Shell functions configured"
 }
 
 setup_tmux_autoattach() {
@@ -600,11 +690,11 @@ setup_nvim_config() {
         return 1
     fi
 
-    backup_if_exists "$target"
-
     if [[ -L "$target" && "$(readlink "$target")" == "$source" ]]; then
         success "Neovim config symlink already correct"
     else
+        # Only backup when we are about to replace something
+        backup_if_exists "$target"
         rm -rf "$target"
         ln -s "$source" "$target"
         success "Neovim config symlinked: $target -> $source"
@@ -650,6 +740,30 @@ setup_tmux_config() {
 }
 
 # -----------------------------------------------------------------------------
+# Prerequisite Check
+# -----------------------------------------------------------------------------
+
+check_prerequisites() {
+    local missing=()
+
+    command_exists git  || missing+=("git")
+    command_exists curl || missing+=("curl")
+    command_exists perl || missing+=("perl")
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        error "Missing required tools: ${missing[*]}"
+        echo ""
+        echo "  Install them before running this script:"
+        echo ""
+        echo "  macOS:          xcode-select --install"
+        echo "  Debian/Ubuntu:  sudo apt-get install -y git curl perl"
+        echo "  Fedora/RHEL:    sudo dnf install -y git curl perl"
+        echo ""
+        exit 1
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
 
@@ -658,6 +772,8 @@ main() {
     echo "  Developer Environment Setup"
     echo "============================================="
     echo ""
+
+    check_prerequisites
 
     local os; os=$(detect_os)
     info "OS: $os | Arch: $(detect_arch)"
@@ -673,6 +789,10 @@ main() {
                     && eval "$(/opt/homebrew/bin/brew shellenv)" \
                     || eval "$(/usr/local/bin/brew shellenv)"
             }
+            # tfenv requires GNU grep; macOS ships with BSD grep
+            brew list grep &>/dev/null || brew install grep
+            # Add GNU grep to PATH so it takes precedence over BSD grep
+            add_line 'export PATH="$(brew --prefix)/opt/grep/libexec/gnubin:$PATH"' "${HOME}/.zshrc"
             ;;
         debian)  sudo apt-get update -qq ;;
         fedora)  sudo dnf check-update -q || true ;;
@@ -707,6 +827,7 @@ main() {
     setup_zsh_env
     setup_zsh_keybindings
     setup_zsh_aliases
+    setup_zsh_functions
     setup_tmux_autoattach
     setup_nvim_config
     setup_tmux_config
@@ -731,24 +852,43 @@ main() {
     cat <<'CHECKLIST'
 
   POST-INSTALL CHECKLIST
-  ─────────────────────
-  1. Install a Nerd Font: https://github.com/ryanoasis/nerd-fonts
-     Recommended: JetBrainsMono Nerd Font
+  ─────────────────────────────────────────────
 
-  2. Set your terminal to use the Nerd Font
+  Complete these steps in order:
+
+  1. Reload your shell:
+       source ~/.zshrc
+
+  2. Install a Nerd Font (required for icons and prompt):
+       https://github.com/ryanoasis/nerd-fonts
+       Recommended: JetBrainsMono Nerd Font
+     Then set it as the font in your terminal emulator.
 
   3. Install Catppuccin theme for your terminal:
-     • iTerm2: https://github.com/catppuccin/iterm
-     • GNOME:  https://github.com/catppuccin/gnome-terminal
+       iTerm2:  https://github.com/catppuccin/iterm
+       GNOME:   https://github.com/catppuccin/gnome-terminal
+       Alacritty: https://github.com/catppuccin/alacritty
 
-  4. Install Java via SDKMAN (after shell reload):
-     sdk install java
+  4. Configure your prompt (only if no p10k.zsh in repo):
+       p10k configure
 
-  5. Install a Go version via goenv (after shell reload):
-     goenv install <version> && goenv global <version>
+  5. Install Node.js:
+       nvm install --lts && nvm use --lts
 
-  6. Reload your shell:
-     source ~/.zshrc
+  6. Install Python:
+       pyenv install 3.13.0 && pyenv global 3.13.0
+
+  7. Install Go:
+       goenv install 1.23.0 && goenv global 1.23.0
+
+  8. Install Java:
+       sdk install java
+
+  9. Install Terraform:
+       tfenv install latest && tfenv use latest
+
+  10. Install tmux plugins:
+       Open tmux, then press: Ctrl-s + I
 
 CHECKLIST
 }

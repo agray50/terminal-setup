@@ -33,6 +33,7 @@ return {
 				"jdtls",
 				"gopls",
 				"bashls",
+				"rust_analyzer",
 			},
 		},
 	},
@@ -47,6 +48,7 @@ return {
 				"isort",
 				"black",
 				"goimports",
+				"rustfmt",
 				"shfmt",
 				-- Linters
 				"pylint",
@@ -54,6 +56,7 @@ return {
 				"golangci-lint",
 				"shellcheck",
 				-- DAP adapters
+				"codelldb",
 				"debugpy",
 				"delve",
 				"js-debug-adapter",

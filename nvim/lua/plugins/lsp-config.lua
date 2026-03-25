@@ -20,6 +20,16 @@ return {
 				},
 			})
 
+			-- Use clippy instead of cargo check for richer diagnostics
+			vim.lsp.config("rust_analyzer", {
+				settings = {
+					["rust-analyzer"] = {
+						checkOnSave = { command = "clippy" },
+						cargo = { allFeatures = true },
+					},
+				},
+			})
+
 			-- Enable schema store so yamlls recognises Kubernetes, GitHub Actions, etc.
 			vim.lsp.config("yamlls", {
 				settings = {
