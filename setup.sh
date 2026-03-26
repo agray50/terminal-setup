@@ -189,7 +189,7 @@ install_zsh() {
     zsh_path=$(command -v zsh)
     if [[ "$SHELL" != "$zsh_path" ]]; then
         grep -qF "$zsh_path" /etc/shells || echo "$zsh_path" | sudo tee -a /etc/shells >/dev/null
-        chsh -s "$zsh_path"
+        chsh -s "$zsh_path" || warn "chsh failed — on directory-managed systems (e.g. Amazon Workspaces) set your default shell manually (see below)"
         warn "Log out and back in for the shell change to take effect"
     fi
 }
@@ -257,6 +257,21 @@ install_zsh_plugins() {
 # -----------------------------------------------------------------------------
 # CLI Tools — binary releases
 # -----------------------------------------------------------------------------
+
+install_bash() {
+    # macOS ships with bash 3.2 (GPL licensing); upgrade to bash 5 via brew
+    if [[ "$(detect_os)" != "macos" ]]; then return 0; fi
+    info "=== bash (upgrade) ==="
+    local current_version
+    current_version=$(bash --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    local major="${current_version%%.*}"
+    if [[ "$major" -ge 5 ]]; then
+        success "bash already at version $current_version"
+        return 0
+    fi
+    brew list bash &>/dev/null || brew install bash
+    success "bash upgraded"
+}
 
 install_fzf() {
     info "=== fzf ==="
@@ -569,6 +584,7 @@ setup_zsh_env() {
 setup_zsh_keybindings() {
     add_block "# Custom keybindings" "$(cat <<'EOF'
 # Custom keybindings
+bindkey -e
 bindkey '^B' backward-kill-line
 bindkey '^F' kill-line
 bindkey '^P' forward-word
@@ -785,16 +801,24 @@ main() {
         macos)
             command_exists brew || {
                 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-                [[ -f /opt/homebrew/bin/brew ]] \
-                    && eval "$(/opt/homebrew/bin/brew shellenv)" \
-                    || eval "$(/usr/local/bin/brew shellenv)"
             }
+            # Always ensure brew is on PATH for this session
+            [[ -f /opt/homebrew/bin/brew ]] \
+                && eval "$(/opt/homebrew/bin/brew shellenv)" \
+                || eval "$(/usr/local/bin/brew shellenv)"
+            # Add Homebrew bin to PATH permanently in .zshrc
+            add_block "# Homebrew" "$(cat <<'EOF'
+# Homebrew — Apple Silicon uses /opt/homebrew, Intel uses /usr/local
+[[ -d /opt/homebrew/bin ]] && export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
+[[ -d /usr/local/bin ]] && export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+EOF
+)" "${HOME}/.zshrc"
             # tfenv requires GNU grep; macOS ships with BSD grep
             brew list grep &>/dev/null || brew install grep
             # Add GNU grep to PATH so it takes precedence over BSD grep
             add_line 'export PATH="$(brew --prefix)/opt/grep/libexec/gnubin:$PATH"' "${HOME}/.zshrc"
             ;;
-        debian)  sudo apt-get update -qq ;;
+        debian)  sudo apt-get update -qq || warn "apt-get update had errors — check /etc/apt/sources.list.d/ for misconfigured repos" ;;
         fedora)  sudo dnf check-update -q || true ;;
     esac
 
@@ -808,6 +832,7 @@ main() {
     install_neovim
     install_tmux
     install_tpm
+    install_bash
     install_rust
     install_ripgrep
     install_fd
