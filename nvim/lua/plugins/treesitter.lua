@@ -4,7 +4,10 @@ return {
 	main = "nvim-treesitter.configs",
 	opts = {
 		auto_install = true,
-		highlight = { enable = true },
+		-- Highlight disabled: Neovim 0.12 provides built-in treesitter highlighting.
+		-- nvim-treesitter's highlight module registers custom query predicates that
+		-- are incompatible with Neovim 0.12's node lifecycle, causing nil node errors.
+		highlight = { enable = false },
 		indent = { enable = true },
 		ensure_installed = {
 			"bash",

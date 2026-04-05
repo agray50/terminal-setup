@@ -211,7 +211,7 @@ install_powerlevel10k() {
         git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$dir"
         success "powerlevel10k installed"
     else
-        success "powerlevel10k already installed"
+        git -C "$dir" pull --ff-only --quiet && success "powerlevel10k updated"
     fi
 
     if [[ -f "${HOME}/.zshrc" ]] && ! grep -q '^ZSH_THEME="powerlevel10k/powerlevel10k"' "${HOME}/.zshrc"; then
@@ -236,14 +236,14 @@ install_zsh_plugins() {
         git clone https://github.com/zsh-users/zsh-syntax-highlighting.git "$custom/zsh-syntax-highlighting"
         success "zsh-syntax-highlighting installed"
     else
-        success "zsh-syntax-highlighting already installed"
+        git -C "$custom/zsh-syntax-highlighting" pull --ff-only --quiet && success "zsh-syntax-highlighting updated"
     fi
 
     if [[ ! -d "$custom/zsh-autosuggestions" ]]; then
         git clone https://github.com/zsh-users/zsh-autosuggestions "$custom/zsh-autosuggestions"
         success "zsh-autosuggestions installed"
     else
-        success "zsh-autosuggestions already installed"
+        git -C "$custom/zsh-autosuggestions" pull --ff-only --quiet && success "zsh-autosuggestions updated"
     fi
 
     if [[ -f "${HOME}/.zshrc" ]]; then
@@ -277,12 +277,12 @@ install_fzf() {
     info "=== fzf ==="
     if [[ ! -d "${HOME}/.fzf" ]]; then
         git clone --depth 1 https://github.com/junegunn/fzf.git "${HOME}/.fzf"
-        # --bin: download prebuilt binary only; shell integration handled below
-        "${HOME}/.fzf/install" --bin
         success "fzf installed"
     else
-        success "fzf already installed"
+        git -C "${HOME}/.fzf" pull --ff-only --quiet && success "fzf updated"
     fi
+    # --bin: download prebuilt binary only; shell integration handled via explicit functions
+    "${HOME}/.fzf/install" --bin
 
     # Ensure binary is reachable from LOCAL_BIN
     mkdir -p "$LOCAL_BIN"
@@ -296,10 +296,6 @@ install_fzf() {
 
 install_neovim() {
     info "=== neovim ==="
-    if command_exists nvim; then
-        success "neovim already installed: $(nvim --version | head -1)"
-        return 0
-    fi
 
     local os arch url
     os=$(detect_os)
@@ -329,8 +325,6 @@ install_neovim() {
 
 install_ripgrep() {
     info "=== ripgrep ==="
-    command_exists rg && { success "ripgrep already installed"; return 0; }
-
     local tag version target
     tag=$(github_latest_tag "BurntSushi/ripgrep")
     version="${tag#v}"
@@ -342,8 +336,6 @@ install_ripgrep() {
 
 install_fd() {
     info "=== fd ==="
-    command_exists fd && { success "fd already installed"; return 0; }
-
     local tag target
     tag=$(github_latest_tag "sharkdp/fd")
     target=$(detect_rust_target)
@@ -354,8 +346,6 @@ install_fd() {
 
 install_bat() {
     info "=== bat ==="
-    command_exists bat && { success "bat already installed"; return 0; }
-
     local tag target
     tag=$(github_latest_tag "sharkdp/bat")
     target=$(detect_rust_target)
@@ -366,14 +356,12 @@ install_bat() {
 
 install_eza() {
     info "=== eza ==="
-    command_exists eza && { success "eza already installed"; return 0; }
-
     local os arch url
     os=$(detect_os)
 
     # eza has no macOS binaries on GitHub releases — brew is the only option
     if [[ "$os" == "macos" ]]; then
-        pkg_install "eza" "macos"
+        brew upgrade eza 2>/dev/null || brew install eza
         return 0
     fi
 
@@ -390,8 +378,6 @@ install_eza() {
 
 install_jq() {
     info "=== jq ==="
-    command_exists jq && { success "jq already installed"; return 0; }
-
     local os arch jq_os jq_arch
     os=$(detect_os)
     arch=$(detect_arch)
@@ -405,8 +391,6 @@ install_jq() {
 
 install_yq() {
     info "=== yq ==="
-    command_exists yq && { success "yq already installed"; return 0; }
-
     local os arch yq_os yq_arch
     os=$(detect_os)
     arch=$(detect_arch)
@@ -420,8 +404,6 @@ install_yq() {
 
 install_k9s() {
     info "=== k9s ==="
-    command_exists k9s && { success "k9s already installed"; return 0; }
-
     local os arch k9s_os k9s_arch
     os=$(detect_os)
     arch=$(detect_arch)
@@ -449,12 +431,12 @@ install_tmux() {
 install_tpm() {
     info "=== tpm ==="
     local dir="${HOME}/.tmux/plugins/tpm"
-    if [[ -d "$dir" ]]; then
-        success "tpm already installed"
-        return 0
+    if [[ ! -d "$dir" ]]; then
+        git clone https://github.com/tmux-plugins/tpm "$dir"
+        success "tpm installed"
+    else
+        git -C "$dir" pull --ff-only --quiet && success "tpm updated"
     fi
-    git clone https://github.com/tmux-plugins/tpm "$dir"
-    success "tpm installed"
 }
 
 # -----------------------------------------------------------------------------
@@ -478,7 +460,9 @@ install_nvm() {
     if [[ -d "${HOME}/.nvm" ]]; then
         success "nvm already installed"
     else
-        curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+        local tag
+        tag=$(github_latest_tag "nvm-sh/nvm")
+        curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/${tag}/install.sh" | bash
         success "nvm installed"
     fi
 
@@ -513,11 +497,11 @@ EOF
 
 install_goenv() {
     info "=== goenv ==="
-    if [[ -d "${HOME}/.goenv" ]]; then
-        success "goenv already installed"
-    else
+    if [[ ! -d "${HOME}/.goenv" ]]; then
         git clone --depth=1 https://github.com/go-nv/goenv.git "${HOME}/.goenv"
         success "goenv installed"
+    else
+        git -C "${HOME}/.goenv" pull --ff-only --quiet && success "goenv updated"
     fi
 
     add_block "# goenv" "$(cat <<'EOF'
@@ -551,13 +535,11 @@ EOF
 
 install_tfenv() {
     info "=== tfenv ==="
-    if command_exists tfenv; then
-        success "tfenv already installed"
-        return 0
-    fi
-
     if [[ ! -d "${HOME}/.tfenv" ]]; then
         git clone --depth=1 https://github.com/tfutils/tfenv.git "${HOME}/.tfenv"
+        success "tfenv installed"
+    else
+        git -C "${HOME}/.tfenv" pull --ff-only --quiet && success "tfenv updated"
     fi
 
     mkdir -p "$LOCAL_BIN"
@@ -718,13 +700,43 @@ setup_nvim_config() {
     fi
 
     if command_exists nvim; then
-        info "Running lazy.nvim headless sync..."
-        nvim --headless "+Lazy! sync" +qa 2>/dev/null \
-            || warn "Lazy sync had issues; open nvim to resolve"
-        success "Lazy.nvim sync complete"
+        info "Restoring plugins from lock file..."
+        nvim --headless "+Lazy! restore" +qa 2>/dev/null \
+            || warn "Lazy restore had issues; open nvim to resolve"
+        success "Lazy.nvim restore complete"
+
+        info "Updating treesitter parsers..."
+        nvim --headless "+TSUpdate" +qa 2>/dev/null \
+            || warn "TSUpdate had issues; run :TSUpdate manually in nvim"
+        success "Treesitter parsers updated"
     else
-        warn "nvim not in PATH yet; skipping Lazy sync (re-run setup after shell reload)"
+        warn "nvim not in PATH yet; skipping Lazy sync and TSUpdate (re-run setup after shell reload)"
     fi
+}
+
+setup_clipboard_helper() {
+    # macOS uses pbcopy natively — no helper needed
+    [[ "$(detect_os)" == "macos" ]] && return 0
+
+    info "=== clipboard helper ==="
+
+    # Install both clipboard backends: xclip (X11) and wl-clipboard (Wayland)
+    command_exists xclip    || pkg_install "xclip"
+    command_exists wl-copy  || pkg_install "wl-clipboard"
+
+    # Write a runtime-detection wrapper so tmux works on both X11 and Wayland
+    mkdir -p "$LOCAL_BIN"
+    cat > "$LOCAL_BIN/tmux-clipboard" <<'EOF'
+#!/bin/sh
+# Route clipboard writes to the correct backend at runtime
+if [ -n "$WAYLAND_DISPLAY" ] && command -v wl-copy >/dev/null 2>&1; then
+    wl-copy
+elif command -v xclip >/dev/null 2>&1; then
+    xclip -in -selection clipboard
+fi
+EOF
+    chmod 755 "$LOCAL_BIN/tmux-clipboard"
+    success "clipboard helper installed (Wayland + X11)"
 }
 
 setup_tmux_config() {
@@ -740,9 +752,9 @@ setup_tmux_config() {
     backup_if_exists "$target"
     cp "$source" "$target"
 
+    # On Linux replace pbcopy with the cross-display-server clipboard helper
     if [[ "$(detect_os)" != "macos" ]]; then
-        sed -i 's|copy-pipe-and-cancel "pbcopy"|copy-pipe-and-cancel "xclip -in -selection clipboard"|' "$target"
-        command_exists xclip || pkg_install "xclip"
+        sed -i 's|copy-pipe-and-cancel "pbcopy"|copy-pipe-and-cancel "tmux-clipboard"|' "$target"
     fi
 
     success "tmux config installed"
@@ -766,15 +778,16 @@ check_prerequisites() {
     command_exists git  || missing+=("git")
     command_exists curl || missing+=("curl")
     command_exists perl || missing+=("perl")
+    command_exists make || missing+=("make")
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         error "Missing required tools: ${missing[*]}"
         echo ""
         echo "  Install them before running this script:"
         echo ""
-        echo "  macOS:          xcode-select --install"
-        echo "  Debian/Ubuntu:  sudo apt-get install -y git curl perl"
-        echo "  Fedora/RHEL:    sudo dnf install -y git curl perl"
+        echo "  macOS:          xcode-select --install   (includes git, make, curl)"
+        echo "  Debian/Ubuntu:  sudo apt-get install -y git curl perl build-essential"
+        echo "  Fedora/RHEL:    sudo dnf install -y git curl perl make gcc"
         echo ""
         exit 1
     fi
@@ -819,8 +832,14 @@ EOF
             # Add GNU grep to PATH so it takes precedence over BSD grep
             add_line 'export PATH="$(brew --prefix)/opt/grep/libexec/gnubin:$PATH"' "${HOME}/.zshrc"
             ;;
-        debian)  sudo apt-get update -qq || warn "apt-get update had errors — check /etc/apt/sources.list.d/ for misconfigured repos" ;;
-        fedora)  sudo dnf check-update -q || true ;;
+        debian)
+            sudo apt-get update -qq || warn "apt-get update had errors — check /etc/apt/sources.list.d/ for misconfigured repos"
+            sudo apt-get install -y --no-install-recommends build-essential
+            ;;
+        fedora)
+            sudo dnf check-update -q || true
+            sudo dnf install -y make gcc
+            ;;
     esac
 
     echo ""
@@ -855,6 +874,7 @@ EOF
     setup_zsh_aliases
     setup_zsh_functions
     setup_tmux_autoattach
+    setup_clipboard_helper
     setup_nvim_config
     setup_tmux_config
 
@@ -901,11 +921,11 @@ EOF
   5. Install Node.js:
        nvm install --lts && nvm use --lts
 
-  6. Install Python:
-       pyenv install 3.13.0 && pyenv global 3.13.0
+  6. Install Python (find latest: pyenv install --list | grep -E '^\s+3\.[0-9]+\.[0-9]+$' | tail -1):
+       pyenv install <version> && pyenv global <version>
 
-  7. Install Go:
-       goenv install 1.23.0 && goenv global 1.23.0
+  7. Install Go (find latest: goenv install --list | tail -5):
+       goenv install <version> && goenv global <version>
 
   8. Install Java:
        sdk install java

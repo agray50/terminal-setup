@@ -16,13 +16,15 @@ Homebrew is installed automatically by the script if missing.
 
 **Linux (Debian/Ubuntu)**:
 ```bash
-sudo apt-get install -y git curl perl
+sudo apt-get install -y git curl perl build-essential
 ```
 
 **Linux (Fedora/RHEL)**:
 ```bash
-sudo dnf install -y git curl perl
+sudo dnf install -y git curl perl make gcc
 ```
+
+> `build-essential` / `make gcc` are required to compile the native fzf extension used by Telescope.
 
 ---
 
@@ -74,14 +76,14 @@ nvm use --lts
 
 ### 6. Install Python (via pyenv)
 ```bash
-pyenv install 3.13.0    # or latest stable
-pyenv global 3.13.0
+pyenv install --list | grep -E '^\s+3\.[0-9]+\.[0-9]+$' | tail -1   # find latest
+pyenv install <version> && pyenv global <version>
 ```
 
 ### 7. Install Go (via goenv)
 ```bash
-goenv install 1.23.0    # or latest stable
-goenv global 1.23.0
+goenv install --list | tail -5   # find latest
+goenv install <version> && goenv global <version>
 ```
 
 ### 8. Install Java (via SDKMAN)
@@ -204,7 +206,7 @@ New terminal sessions automatically attach to (or create) a tmux session named `
 | `prefix + h/j/k/l` | Navigate panes |
 | `prefix + I` | Install plugins (tpm) |
 
-**Plugins:** [tpm](https://github.com/tmux-plugins/tpm) · [vim-tmux-navigator](https://github.com/christoomey/vim-tmux-navigator) · [catppuccin/tmux](https://github.com/catppuccin/tmux)
+**Plugins:** [tpm](https://github.com/tmux-plugins/tpm) · [vim-tmux-navigator](https://github.com/christoomey/vim-tmux-navigator) · [catppuccin/tmux](https://github.com/catppuccin/tmux) · [tmux-cpu](https://github.com/tmux-plugins/tmux-cpu)
 
 ---
 
@@ -213,6 +215,7 @@ New terminal sessions automatically attach to (or create) a tmux session named `
 **Plugin manager:** [lazy.nvim](https://github.com/folke/lazy.nvim) — specs in `nvim/lua/plugins/`
 **Leader key:** `Space`
 **Colorscheme:** Catppuccin Mocha
+**Requires:** Neovim 0.12+
 
 ### Plugins
 
@@ -239,9 +242,9 @@ New terminal sessions automatically attach to (or create) a tmux session named `
 | [vim-fugitive](https://github.com/tpope/vim-fugitive) | Git client |
 | [gitsigns.nvim](https://github.com/lewis6991/gitsigns.nvim) | Git hunk signs and actions |
 | [diffview.nvim](https://github.com/sindrets/diffview.nvim) | Diff viewer |
-| [undotree](https://github.com/mbbill/undotree) | Undo history visualiser |
+| nvim.undotree (built-in) | Undo history visualiser (Neovim 0.12+, no plugin) |
 | [vim-tmux-navigator](https://github.com/christoomey/vim-tmux-navigator) | Seamless tmux/nvim pane navigation |
-| [markview.nvim](https://github.com/OXY2DEV/markview.nvim) | Markdown rendering |
+| [render-markdown.nvim](https://github.com/MeanderingProgrammer/render-markdown.nvim) | Markdown rendering (Neovim 0.12+ compatible) |
 
 ### LSP Servers (auto-installed via Mason)
 
@@ -272,7 +275,7 @@ New terminal sessions automatically attach to (or create) a tmux session named `
 | isort + black | Python |
 | goimports | Go |
 | rustfmt | Rust |
-| terraform_fmt | Terraform, HCL |
+| terraform_fmt | Terraform, HCL (requires terraform binary via tfenv) |
 | shfmt | Bash / Shell |
 
 ### Linters (nvim-lint)
@@ -356,8 +359,8 @@ New terminal sessions automatically attach to (or create) a tmux session named `
 | `<leader>kl` | Line diagnostic float |
 | `<leader>kk` | Hover |
 | `<leader>kh` | Signature help |
-| `<leader>kI` | LSP info |
-| `<leader>kR` | Restart LSP |
+| `<leader>kI` | LSP info (`:lsp`) |
+| `<leader>kR` | Restart LSP (`:lsp restart`) |
 
 #### Debug — DAP (`<leader>d`)
 
@@ -445,7 +448,7 @@ New terminal sessions automatically attach to (or create) a tmux session named `
 
 | Key | Action |
 |---|---|
-| `<C-space>` | Show menu / toggle docs |
+| `<C-b>` | Show menu / toggle docs |
 | `<Tab>` | Next item / next snippet placeholder |
 | `<S-Tab>` | Prev item / prev snippet placeholder |
 | `<CR>` | Accept |

@@ -48,10 +48,10 @@ return {
 					end
 
 					-- Navigation
-					map("<leader>kd", "<cmd>Telescope lsp_definitions<CR>",    "󰈮 Go to definition")
-					map("<leader>kD", vim.lsp.buf.declaration,                 "󰈮 Go to declaration")
-					map("<leader>kr", "<cmd>Telescope lsp_references<CR>",     "󰈇 References")
-					map("<leader>ki", "<cmd>Telescope lsp_implementations<CR>","󰡱 Implementation")
+					map("<leader>kd", "<cmd>Telescope lsp_definitions<CR>",     "󰈮 Go to definition")
+					map("<leader>kD", vim.lsp.buf.declaration,                  "󰈮 Go to declaration")
+					map("<leader>kr", "<cmd>Telescope lsp_references<CR>",      "󰈇 References")
+					map("<leader>ki", "<cmd>Telescope lsp_implementations<CR>", "󰡱 Implementation")
 					map("<leader>kt", "<cmd>Telescope lsp_type_definitions<CR>","󰜢 Type definition")
 					map("<leader>ks", "<cmd>Telescope lsp_document_symbols<CR>","󰫧 Document symbols")
 					map("<leader>kS", "<cmd>Telescope lsp_workspace_symbols<CR>","󰫧 Workspace symbols")
@@ -68,13 +68,10 @@ return {
 					-- Hover / info
 					map("<leader>kk", vim.lsp.buf.hover,          "󰈙 Hover")
 					map("<leader>kh", vim.lsp.buf.signature_help, "󰊕 Signature help")
-					map("<leader>kI", "<cmd>LspInfo<CR>",         "󰋼 LSP info")
+					map("<leader>kI", "<cmd>lsp<CR>",             "󰋼 LSP info")
 
-					-- LSP management
-					vim.keymap.set("n", "<leader>kR", function()
-						vim.lsp.stop_client(vim.lsp.get_clients({ bufnr = 0 }))
-						vim.defer_fn(function() vim.cmd("edit") end, 100)
-					end, vim.tbl_extend("force", opts, { desc = "󰑓 Restart LSP" }))
+					-- LSP management (0.12 built-in :lsp command)
+					map("<leader>kR", "<cmd>lsp restart<CR>", "󰑓 Restart LSP")
 				end,
 			})
 
@@ -89,6 +86,8 @@ return {
 						[severity.INFO] = "󰋽 ",
 					},
 				},
+				-- Show diagnostic inline below the current line (0.11+)
+				virtual_lines = { current_line = true },
 			})
 		end,
 	},
