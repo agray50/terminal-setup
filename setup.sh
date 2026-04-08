@@ -484,6 +484,37 @@ install_rust() {
     add_line '. "$HOME/.cargo/env"' "${HOME}/.zshrc"
 }
 
+install_tree_sitter_cli() {
+    info "=== tree-sitter-cli ==="
+    local os arch tag asset url tmpfile
+    os=$(detect_os)
+    # Release assets use 'x64' not 'x86_64'
+    case "$(uname -m)" in
+        x86_64) arch="x64" ;;
+        arm64|aarch64) arch="arm64" ;;
+        *) warn "Unsupported arch for tree-sitter-cli: $(uname -m)"; return 0 ;;
+    esac
+
+    tag=$(github_latest_tag "tree-sitter/tree-sitter")
+    if [[ -z "$tag" ]]; then
+        warn "Could not resolve tree-sitter-cli version — skipping"
+        return 0
+    fi
+
+    asset="tree-sitter-${os}-${arch}.gz"
+    url="https://github.com/tree-sitter/tree-sitter/releases/download/${tag}/${asset}"
+
+    info "Installing tree-sitter-cli ${tag}..."
+    tmpfile=$(mktemp)
+    curl -fsSL "$url" -o "${tmpfile}.gz"
+    gunzip -f "${tmpfile}.gz"
+    mkdir -p "$LOCAL_BIN"
+    mv "$tmpfile" "$LOCAL_BIN/tree-sitter"
+    chmod 755 "$LOCAL_BIN/tree-sitter"
+    rm -f "$tmpfile" "${tmpfile}.gz" 2>/dev/null || true
+    success "tree-sitter-cli installed: ${tag}"
+}
+
 install_nvm() {
     info "=== nvm ==="
     if [[ -d "${HOME}/.nvm" ]]; then
@@ -738,13 +769,8 @@ setup_nvim_config() {
         nvim --headless "+Lazy! restore" +qa 2>/dev/null \
             || warn "Lazy restore had issues; open nvim to resolve"
         success "Lazy.nvim restore complete"
-
-        info "Updating treesitter parsers..."
-        nvim --headless "+TSUpdate" +qa 2>/dev/null \
-            || warn "TSUpdate had issues; run :TSUpdate manually in nvim"
-        success "Treesitter parsers updated"
     else
-        warn "nvim not in PATH yet; skipping Lazy sync and TSUpdate (re-run setup after shell reload)"
+        warn "nvim not in PATH yet; skipping Lazy restore (re-run setup after shell reload)"
     fi
 }
 
@@ -886,6 +912,7 @@ EOF
     install_tpm
     install_bash
     install_rust
+    install_tree_sitter_cli
     install_ripgrep
     install_fd
     install_bat

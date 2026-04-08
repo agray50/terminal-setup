@@ -30,10 +30,8 @@ vim.opt.undofile = true
 vim.opt.mouse = "a"
 vim.opt.clipboard = "unnamedplus"
 
--- Folding (treesitter-based, all folds open by default)
--- nvim-treesitter manages parser attachment; do not call vim.treesitter.start manually
-vim.opt.foldmethod = "expr"
-vim.opt.foldexpr = "v:lua.vim.treesitter.foldexpr()"
+-- Folding — method/expr set per-buffer in treesitter FileType autocmd;
+-- these globals keep all folds open by default
 vim.opt.foldlevel = 99
 vim.opt.foldlevelstart = 99
 
