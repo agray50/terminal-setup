@@ -11,12 +11,12 @@ return {
 			if vim.fn.executable("tree-sitter") == 1 then
 				require("nvim-treesitter").install({
 					"bash", "c", "diff", "go", "html", "javascript", "jsdoc",
-					"json", "jsonc", "lua", "luadoc", "luap", "markdown",
+					"json", "json5", "lua", "luadoc", "luap", "markdown",
 					"markdown_inline", "printf", "python", "query", "regex",
 					"toml", "tsx", "typescript", "vim", "vimdoc", "xml", "yaml",
 				})
 			else
-				vim.notify("nvim-treesitter: tree-sitter CLI not found — run 'brew install tree-sitter' (macOS) or 'cargo install tree-sitter-cli' (Linux)", vim.log.levels.WARN)
+				vim.notify("nvim-treesitter: tree-sitter CLI not found in PATH — re-run setup.sh or install manually from https://github.com/tree-sitter/tree-sitter/releases", vim.log.levels.WARN)
 			end
 
 			-- Enable treesitter highlighting, indentation, and folding per-buffer

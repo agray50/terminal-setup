@@ -12,7 +12,7 @@ return {
 				{ "<leader>k", group = "lsp" },
 				{ "<leader>m", group = "format" },
 				{ "<leader>t", group = "toggle" },
-				{ "<leader>u", group = "undotree" },
+				{ "<leader>Q", desc = "Close all tool panels" },
 			},
 		},
 		keys = {

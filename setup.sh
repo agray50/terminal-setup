@@ -127,6 +127,25 @@ except Exception:
 "
 }
 
+# Returns 0 (skip) if the binary is already at latest_tag, 1 (needs install/update).
+# Prints status in both cases.
+# Usage: version_up_to_date "name" "latest_tag" "$(binary --version 2>/dev/null | head -1)"
+version_up_to_date() {
+    local name="$1" latest_tag="$2" installed="$3"
+    local latest_ver="${latest_tag#v}"  # strip leading 'v' for string matching
+    if [[ -z "$installed" ]]; then
+        info "Installing ${name} ${latest_tag}..."
+        return 1
+    fi
+    if echo "$installed" | grep -qF "$latest_ver"; then
+        success "${name} ${latest_tag} — up to date"
+        return 0
+    fi
+    local cur; cur=$(echo "$installed" | grep -oE '[0-9][0-9.]*[0-9]' | head -1)
+    info "Updating ${name}: ${cur} → ${latest_ver}"
+    return 1
+}
+
 # In-place sed that works on both GNU (Linux) and BSD (macOS) sed
 sed_inplace() {
     local expr="$1" file="$2"
@@ -162,7 +181,6 @@ install_from_tarball() {
     local tmpdir
     tmpdir=$(mktemp -d)
 
-    info "Downloading $binary..."
     curl -fsSL "$url" -o "$tmpdir/archive.tar.gz"
     tar -xzf "$tmpdir/archive.tar.gz" -C "$tmpdir"
 
@@ -179,17 +197,14 @@ install_from_tarball() {
     cp "$bin_path" "$LOCAL_BIN/$binary"
     chmod 755 "$LOCAL_BIN/$binary"
     rm -rf "$tmpdir"
-    success "$binary installed"
 }
 
 # Download a single binary file directly to LOCAL_BIN
 install_from_binary_url() {
     local url="$1" binary="$2"
-    info "Downloading $binary..."
     mkdir -p "$LOCAL_BIN"
     curl -fsSL "$url" -o "$LOCAL_BIN/$binary"
     chmod 755 "$LOCAL_BIN/$binary"
-    success "$binary installed"
 }
 
 # -----------------------------------------------------------------------------
@@ -278,9 +293,9 @@ install_zsh_plugins() {
 # -----------------------------------------------------------------------------
 
 install_bash() {
+    info "=== bash ==="
     # macOS ships with bash 3.2 (GPL licensing); upgrade to bash 5 via brew
-    if [[ "$(detect_os)" != "macos" ]]; then return 0; fi
-    info "=== bash (upgrade) ==="
+    if [[ "$(detect_os)" != "macos" ]]; then success "bash — skipped (Linux)"; return 0; fi
     local current_version
     current_version=$(bash --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
     local major="${current_version%%.*}"
@@ -294,16 +309,22 @@ install_bash() {
 
 install_fzf() {
     info "=== fzf ==="
+    local tag needs_binary=true
+    tag=$(github_latest_tag "junegunn/fzf")
+
     if [[ ! -d "${HOME}/.fzf" ]]; then
         git clone --depth 1 https://github.com/junegunn/fzf.git "${HOME}/.fzf"
-        success "fzf installed"
     else
-        git -C "${HOME}/.fzf" pull --ff-only --quiet && success "fzf updated"
+        git -C "${HOME}/.fzf" pull --ff-only --quiet
+        # Skip binary download if already at latest
+        version_up_to_date "fzf" "$tag" "$("$LOCAL_BIN/fzf" --version 2>/dev/null | head -1)" && needs_binary=false
     fi
-    # --bin: download prebuilt binary only; shell integration handled via explicit functions
-    "${HOME}/.fzf/install" --bin
 
-    # Ensure binary is reachable from LOCAL_BIN
+    if $needs_binary; then
+        "${HOME}/.fzf/install" --bin
+        success "fzf ${tag} installed"
+    fi
+
     mkdir -p "$LOCAL_BIN"
     ln -sf "${HOME}/.fzf/bin/fzf" "$LOCAL_BIN/fzf"
 
@@ -322,11 +343,11 @@ install_neovim() {
     tag=$(github_latest_tag_prefix "neovim/neovim" "$NVIM_MINOR")
 
     if [[ -z "$tag" ]]; then
-        warn "Could not resolve latest neovim ${NVIM_MINOR}x tag (API rate limit or network issue) — skipping neovim install"
+        warn "Could not resolve latest neovim ${NVIM_MINOR}x tag (API rate limit or network issue) — skipping"
         return 0
     fi
 
-    info "Installing neovim ${tag}..."
+    version_up_to_date "neovim" "$tag" "$(nvim --version 2>/dev/null | head -1)" && return 0
 
     if [[ "$os" == "macos" ]]; then
         url="https://github.com/neovim/neovim/releases/download/${tag}/nvim-macos-${arch}.tar.gz"
@@ -346,102 +367,114 @@ install_neovim() {
     mkdir -p "$LOCAL_BIN"
     ln -sf "${HOME}/.local/nvim/bin/nvim" "$LOCAL_BIN/nvim"
     rm -rf "$tmpdir"
-
-    local installed_ver
-    installed_ver=$("${HOME}/.local/nvim/bin/nvim" --version 2>/dev/null | head -1)
-    success "neovim installed: ${installed_ver}"
+    success "neovim ${tag} installed"
 }
 
 install_ripgrep() {
     info "=== ripgrep ==="
     local tag version target
     tag=$(github_latest_tag "BurntSushi/ripgrep")
+    version_up_to_date "rg" "$tag" "$("$LOCAL_BIN/rg" --version 2>/dev/null | head -1)" && return 0
     version="${tag#v}"
     target=$(detect_rust_target)
     install_from_tarball \
         "https://github.com/BurntSushi/ripgrep/releases/download/${tag}/ripgrep-${version}-${target}.tar.gz" \
         "rg"
+    success "rg ${tag} installed"
 }
 
 install_fd() {
     info "=== fd ==="
     local tag target
     tag=$(github_latest_tag "sharkdp/fd")
+    version_up_to_date "fd" "$tag" "$("$LOCAL_BIN/fd" --version 2>/dev/null | head -1)" && return 0
     target=$(detect_rust_target)
     install_from_tarball \
         "https://github.com/sharkdp/fd/releases/download/${tag}/fd-${tag}-${target}.tar.gz" \
         "fd"
+    success "fd ${tag} installed"
 }
 
 install_bat() {
     info "=== bat ==="
     local tag target
     tag=$(github_latest_tag "sharkdp/bat")
+    version_up_to_date "bat" "$tag" "$("$LOCAL_BIN/bat" --version 2>/dev/null | head -1)" && return 0
     target=$(detect_rust_target)
     install_from_tarball \
         "https://github.com/sharkdp/bat/releases/download/${tag}/bat-${tag}-${target}.tar.gz" \
         "bat"
+    success "bat ${tag} installed"
 }
 
 install_eza() {
     info "=== eza ==="
-    local os arch url
+    local os arch tag url
     os=$(detect_os)
+    tag=$(github_latest_tag "eza-community/eza")
+    version_up_to_date "eza" "$tag" "$("$LOCAL_BIN/eza" --version 2>/dev/null | head -1)" && return 0
 
-    # eza has no macOS binaries on GitHub releases — brew is the only option
     if [[ "$os" == "macos" ]]; then
+        # No macOS binaries in eza releases — brew is the only option
         brew upgrade eza 2>/dev/null || brew install eza
+        success "eza ${tag} installed"
         return 0
     fi
 
     # Linux: x86_64 has a musl build; aarch64 only has gnu
     arch=$(detect_arch_rust)
     if [[ "$arch" == "x86_64" ]]; then
-        url="https://github.com/eza-community/eza/releases/latest/download/eza_x86_64-unknown-linux-musl.tar.gz"
+        url="https://github.com/eza-community/eza/releases/download/${tag}/eza_x86_64-unknown-linux-musl.tar.gz"
     else
-        url="https://github.com/eza-community/eza/releases/latest/download/eza_${arch}-unknown-linux-gnu.tar.gz"
+        url="https://github.com/eza-community/eza/releases/download/${tag}/eza_${arch}-unknown-linux-gnu.tar.gz"
     fi
-
     install_from_tarball "$url" "eza"
+    success "eza ${tag} installed"
 }
 
 install_jq() {
     info "=== jq ==="
-    local os arch jq_os jq_arch
+    local os arch tag jq_os jq_arch
     os=$(detect_os)
     arch=$(detect_arch)
+    tag=$(github_latest_tag "jqlang/jq")
+    version_up_to_date "jq" "$tag" "$("$LOCAL_BIN/jq" --version 2>/dev/null)" && return 0
     [[ "$os" == "macos" ]] && jq_os="macos" || jq_os="linux"
     [[ "$arch" == "x86_64" ]] && jq_arch="amd64" || jq_arch="arm64"
-
     install_from_binary_url \
-        "https://github.com/jqlang/jq/releases/latest/download/jq-${jq_os}-${jq_arch}" \
+        "https://github.com/jqlang/jq/releases/download/${tag}/jq-${jq_os}-${jq_arch}" \
         "jq"
+    success "jq ${tag} installed"
 }
 
 install_yq() {
     info "=== yq ==="
-    local os arch yq_os yq_arch
+    local os arch tag yq_os yq_arch
     os=$(detect_os)
     arch=$(detect_arch)
+    tag=$(github_latest_tag "mikefarah/yq")
+    version_up_to_date "yq" "$tag" "$("$LOCAL_BIN/yq" --version 2>/dev/null | head -1)" && return 0
     [[ "$os" == "macos" ]] && yq_os="darwin" || yq_os="linux"
     [[ "$arch" == "x86_64" ]] && yq_arch="amd64" || yq_arch="arm64"
-
     install_from_binary_url \
-        "https://github.com/mikefarah/yq/releases/latest/download/yq_${yq_os}_${yq_arch}" \
+        "https://github.com/mikefarah/yq/releases/download/${tag}/yq_${yq_os}_${yq_arch}" \
         "yq"
+    success "yq ${tag} installed"
 }
 
 install_k9s() {
     info "=== k9s ==="
-    local os arch k9s_os k9s_arch
+    local os arch tag k9s_os k9s_arch
     os=$(detect_os)
     arch=$(detect_arch)
+    tag=$(github_latest_tag "derailed/k9s")
+    version_up_to_date "k9s" "$tag" "$("$LOCAL_BIN/k9s" version 2>/dev/null | grep -i 'Version:' | head -1)" && return 0
     [[ "$os" == "macos" ]] && k9s_os="Darwin" || k9s_os="Linux"
     [[ "$arch" == "x86_64" ]] && k9s_arch="amd64" || k9s_arch="arm64"
-
     install_from_tarball \
-        "https://github.com/derailed/k9s/releases/latest/download/k9s_${k9s_os}_${k9s_arch}.tar.gz" \
+        "https://github.com/derailed/k9s/releases/download/${tag}/k9s_${k9s_os}_${k9s_arch}.tar.gz" \
         "k9s"
+    success "k9s ${tag} installed"
 }
 
 # -----------------------------------------------------------------------------
@@ -488,7 +521,7 @@ install_tree_sitter_cli() {
     info "=== tree-sitter-cli ==="
     local os arch tag asset url tmpfile
     os=$(detect_os)
-    # Release assets use 'x64' not 'x86_64'
+    local asset_os; [[ "$os" == "macos" ]] && asset_os="macos" || asset_os="linux"
     case "$(uname -m)" in
         x86_64) arch="x64" ;;
         arm64|aarch64) arch="arm64" ;;
@@ -501,10 +534,11 @@ install_tree_sitter_cli() {
         return 0
     fi
 
-    asset="tree-sitter-${os}-${arch}.gz"
+    version_up_to_date "tree-sitter" "$tag" "$("$LOCAL_BIN/tree-sitter" --version 2>/dev/null | head -1)" && return 0
+
+    asset="tree-sitter-${asset_os}-${arch}.gz"
     url="https://github.com/tree-sitter/tree-sitter/releases/download/${tag}/${asset}"
 
-    info "Installing tree-sitter-cli ${tag}..."
     tmpfile=$(mktemp)
     curl -fsSL "$url" -o "${tmpfile}.gz"
     gunzip -f "${tmpfile}.gz"
@@ -512,7 +546,7 @@ install_tree_sitter_cli() {
     mv "$tmpfile" "$LOCAL_BIN/tree-sitter"
     chmod 755 "$LOCAL_BIN/tree-sitter"
     rm -f "$tmpfile" "${tmpfile}.gz" 2>/dev/null || true
-    success "tree-sitter-cli installed: ${tag}"
+    success "tree-sitter-cli ${tag} installed"
 }
 
 install_nvm() {
@@ -615,6 +649,7 @@ install_tfenv() {
 # -----------------------------------------------------------------------------
 
 setup_local_bin() {
+    info "=== local bin ==="
     mkdir -p "$LOCAL_BIN"
     # Always remove then re-append so ~/.local/bin ends up at the bottom of
     # .zshrc — sourced last means it prepends last, giving it priority over
@@ -625,11 +660,13 @@ setup_local_bin() {
 }
 
 setup_zsh_env() {
+    info "=== zsh environment ==="
     add_line 'export EDITOR="nvim"' "${HOME}/.zshrc"
-    success "EDITOR set to nvim"
+    success "zsh environment configured"
 }
 
 setup_zsh_keybindings() {
+    info "=== zsh keybindings ==="
     add_block "# Custom keybindings" "$(cat <<'EOF'
 # Custom keybindings
 bindkey -e
@@ -644,6 +681,7 @@ EOF
 }
 
 setup_zsh_aliases() {
+    info "=== zsh aliases ==="
     add_block "# Custom aliases" "$(cat <<'EOF'
 # Custom aliases
 
@@ -683,6 +721,7 @@ EOF
 }
 
 setup_zsh_functions() {
+    info "=== zsh functions ==="
     add_block "# Custom shell functions" "$(cat <<'EOF'
 # Custom shell functions
 
@@ -734,6 +773,7 @@ EOF
 }
 
 setup_tmux_autoattach() {
+    info "=== tmux auto-attach ==="
     add_block "# tmux auto-attach" "$(cat <<'EOF'
 # tmux auto-attach
 if command -v tmux &>/dev/null && [ -z "$TMUX" ]; then
@@ -757,7 +797,6 @@ setup_nvim_config() {
     if [[ -L "$target" && "$(readlink "$target")" == "$source" ]]; then
         success "Neovim config symlink already correct"
     else
-        # Only backup when we are about to replace something
         backup_if_exists "$target"
         rm -rf "$target"
         ln -s "$source" "$target"
@@ -775,10 +814,9 @@ setup_nvim_config() {
 }
 
 setup_clipboard_helper() {
-    # macOS uses pbcopy natively — no helper needed
-    [[ "$(detect_os)" == "macos" ]] && return 0
-
     info "=== clipboard helper ==="
+    # macOS uses pbcopy natively — no helper needed
+    if [[ "$(detect_os)" == "macos" ]]; then success "clipboard — pbcopy (macOS native)"; return 0; fi
 
     # Install both clipboard backends: xclip (X11) and wl-clipboard (Wayland)
     command_exists xclip    || pkg_install "xclip"
@@ -814,7 +852,7 @@ setup_tmux_config() {
 
     # On Linux replace pbcopy with the cross-display-server clipboard helper
     if [[ "$(detect_os)" != "macos" ]]; then
-        sed -i 's|copy-pipe-and-cancel "pbcopy"|copy-pipe-and-cancel "tmux-clipboard"|' "$target"
+        sed_inplace 's|copy-pipe-and-cancel "pbcopy"|copy-pipe-and-cancel "tmux-clipboard"|' "$target"
     fi
 
     success "tmux config installed"

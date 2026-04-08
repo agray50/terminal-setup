@@ -62,13 +62,29 @@ vim.keymap.set("i", "jk", "<Esc>", { desc = "Exit insert mode" })
 
 -- Utility
 vim.keymap.set("n", "<leader>Q", function()
+	-- Plugins with dedicated close commands
 	pcall(function() require("dapui").close() end)
 	pcall(vim.cmd, "DiffviewClose")
 	pcall(vim.cmd, "Neotree close")
 	pcall(vim.cmd, "UndotreeHide")
-	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-		if vim.bo[buf].filetype == "fugitive" then
-			pcall(vim.api.nvim_buf_delete, buf, { force = true })
+
+	-- Close any window whose filetype matches a known panel type
+	local panels = {
+		fugitive        = true,
+		fugitiveblame   = true,
+		["dap-repl"]    = true,
+		dapui_watches   = true,
+		dapui_stacks    = true,
+		dapui_breakpoints = true,
+		dapui_scopes    = true,
+		dapui_console   = true,
+		qf              = true,
+		help            = true,
+	}
+	for _, win in ipairs(vim.api.nvim_list_wins()) do
+		local buf = vim.api.nvim_win_get_buf(win)
+		if panels[vim.bo[buf].filetype] then
+			pcall(vim.api.nvim_win_close, win, true)
 		end
 	end
 end, { desc = "Close all tool panels" })
