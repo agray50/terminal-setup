@@ -14,6 +14,8 @@ LOCAL_BIN="${HOME}/.local/bin"
 BACKUP_DIR="${HOME}/.config-backups/$(date +%Y%m%d-%H%M%S)"
 MANUAL_STEPS=()
 
+NVIM_MINOR="v0.12."  # Pinned minor series — bump manually when ready to move to 0.13+
+
 # -----------------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------------
@@ -106,6 +108,23 @@ backup_if_exists() {
 github_latest_tag() {
     curl -fsLI "https://github.com/$1/releases/latest" -o /dev/null -w '%{url_effective}' 2>/dev/null \
         | sed 's|.*/tag/||'
+}
+
+# Resolve latest stable tag matching a given prefix (e.g. "v0.12.") from GitHub releases API.
+# Releases are returned newest-first; returns the first non-prerelease whose tag_name starts with prefix.
+github_latest_tag_prefix() {
+    local repo="$1" prefix="$2"
+    curl -fsL "https://api.github.com/repos/${repo}/releases" 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    for r in json.load(sys.stdin):
+        if r['tag_name'].startswith('${prefix}') and not r['prerelease']:
+            print(r['tag_name'])
+            break
+except Exception:
+    pass
+"
 }
 
 # In-place sed that works on both GNU (Linux) and BSD (macOS) sed
@@ -297,18 +316,25 @@ install_fzf() {
 install_neovim() {
     info "=== neovim ==="
 
-    local os arch url
+    local os arch tag url
     os=$(detect_os)
     arch=$(detect_arch)
+    tag=$(github_latest_tag_prefix "neovim/neovim" "$NVIM_MINOR")
+
+    if [[ -z "$tag" ]]; then
+        warn "Could not resolve latest neovim ${NVIM_MINOR}x tag (API rate limit or network issue) — skipping neovim install"
+        return 0
+    fi
+
+    info "Installing neovim ${tag}..."
 
     if [[ "$os" == "macos" ]]; then
-        url="https://github.com/neovim/neovim/releases/latest/download/nvim-macos-${arch}.tar.gz"
+        url="https://github.com/neovim/neovim/releases/download/${tag}/nvim-macos-${arch}.tar.gz"
     else
-        url="https://github.com/neovim/neovim/releases/latest/download/nvim-linux-${arch}.tar.gz"
+        url="https://github.com/neovim/neovim/releases/download/${tag}/nvim-linux-${arch}.tar.gz"
     fi
 
     local tmpdir; tmpdir=$(mktemp -d)
-    info "Downloading neovim..."
     curl -fsSL "$url" -o "$tmpdir/nvim.tar.gz"
     tar -xzf "$tmpdir/nvim.tar.gz" -C "$tmpdir"
 
@@ -320,7 +346,10 @@ install_neovim() {
     mkdir -p "$LOCAL_BIN"
     ln -sf "${HOME}/.local/nvim/bin/nvim" "$LOCAL_BIN/nvim"
     rm -rf "$tmpdir"
-    success "neovim installed"
+
+    local installed_ver
+    installed_ver=$("${HOME}/.local/nvim/bin/nvim" --version 2>/dev/null | head -1)
+    success "neovim installed: ${installed_ver}"
 }
 
 install_ripgrep() {
@@ -556,7 +585,12 @@ install_tfenv() {
 
 setup_local_bin() {
     mkdir -p "$LOCAL_BIN"
-    add_line 'export PATH="$HOME/.local/bin:$PATH"' "${HOME}/.zshrc"
+    # Always remove then re-append so ~/.local/bin ends up at the bottom of
+    # .zshrc — sourced last means it prepends last, giving it priority over
+    # Homebrew and any other PATH block written earlier.
+    local line='export PATH="$HOME/.local/bin:$PATH"' zshrc="${HOME}/.zshrc"
+    grep -vF "$line" "$zshrc" > "${zshrc}.tmp" 2>/dev/null && mv "${zshrc}.tmp" "$zshrc" || true
+    echo "$line" >> "$zshrc"
 }
 
 setup_zsh_env() {
@@ -809,8 +843,6 @@ main() {
     info "OS: $os | Arch: $(detect_arch)"
     echo ""
 
-    setup_local_bin
-
     case "$os" in
         macos)
             command_exists brew || {
@@ -870,6 +902,7 @@ EOF
     echo ""
     info "--- Configuring dotfiles ---"
     setup_zsh_env
+    setup_local_bin
     setup_zsh_keybindings
     setup_zsh_aliases
     setup_zsh_functions
