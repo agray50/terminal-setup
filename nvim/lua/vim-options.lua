@@ -64,6 +64,7 @@ vim.keymap.set("i", "jk", "<Esc>", { desc = "Exit insert mode" })
 vim.keymap.set("n", "<leader>Q", function()
 	-- Plugins with dedicated close commands
 	pcall(function() require("dapui").close() end)
+	pcall(function() require("telescope.actions").close(vim.api.nvim_get_current_buf()) end)
 	pcall(vim.cmd, "DiffviewClose")
 	pcall(vim.cmd, "Neotree close")
 	pcall(vim.cmd, "UndotreeHide")
@@ -78,6 +79,9 @@ vim.keymap.set("n", "<leader>Q", function()
 		dapui_breakpoints = true,
 		dapui_scopes    = true,
 		dapui_console   = true,
+		TelescopePrompt = true,
+		TelescopeResults = true,
+		TelescopePreview = true,
 		qf              = true,
 		help            = true,
 	}

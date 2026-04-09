@@ -507,7 +507,7 @@ install_tpm() {
 
 install_rust() {
     info "=== Rust ==="
-    if command_exists cargo; then
+    if [[ -f "${HOME}/.cargo/bin/cargo" ]]; then
         success "Rust already installed"
     else
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
@@ -573,7 +573,7 @@ EOF
 
 install_pyenv() {
     info "=== pyenv ==="
-    if command_exists pyenv; then
+    if [[ -d "${HOME}/.pyenv" ]]; then
         success "pyenv already installed"
     else
         curl https://pyenv.run | bash
@@ -613,7 +613,13 @@ install_sdkman() {
     if [[ -d "${HOME}/.sdkman" ]]; then
         success "SDKMAN already installed"
     else
-        curl -s "https://get.sdkman.io" | bash
+        command_exists zip  || pkg_install "zip"
+        command_exists unzip || pkg_install "unzip"
+        local sdkman_script
+        sdkman_script=$(mktemp)
+        curl -s "https://get.sdkman.io" -o "$sdkman_script"
+        bash "$sdkman_script"
+        rm -f "$sdkman_script"
         success "SDKMAN installed"
     fi
 
