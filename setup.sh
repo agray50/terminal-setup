@@ -805,6 +805,7 @@ setup_nvim_config() {
     else
         backup_if_exists "$target"
         rm -rf "$target"
+        mkdir -p "$(dirname "$target")"
         ln -s "$source" "$target"
         success "Neovim config symlinked: $target -> $source"
     fi
