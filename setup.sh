@@ -633,6 +633,60 @@ EOF
 )" "${HOME}/.zshrc"
 }
 
+install_docker() {
+    info "=== Docker ==="
+    if command_exists docker; then
+        success "Docker already installed"
+        return 0
+    fi
+
+    local os
+    os=$(detect_os)
+
+    case "$os" in
+        macos)
+            manual "Install Docker Desktop: brew install --cask docker"
+            ;;
+        debian)
+            local distro_id
+            distro_id=$(. /etc/os-release && echo "${ID}")
+            sudo apt-get install -y ca-certificates curl
+            sudo install -m 0755 -d /etc/apt/keyrings
+            sudo curl -fsSL "https://download.docker.com/linux/${distro_id}/gpg" \
+                -o /etc/apt/keyrings/docker.asc
+            sudo chmod a+r /etc/apt/keyrings/docker.asc
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/${distro_id} \
+$(. /etc/os-release && echo "${VERSION_CODENAME}") stable" \
+                | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            sudo apt-get update -qq
+            sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
+                docker-buildx-plugin docker-compose-plugin
+            sudo usermod -aG docker "$USER"
+            success "Docker installed — re-login for group membership to take effect"
+            ;;
+        fedora)
+            sudo dnf -y install dnf-plugins-core
+            sudo dnf config-manager --add-repo \
+                https://download.docker.com/linux/fedora/docker-ce.repo
+            sudo dnf install -y docker-ce docker-ce-cli containerd.io \
+                docker-buildx-plugin docker-compose-plugin
+            sudo systemctl enable --now docker
+            sudo usermod -aG docker "$USER"
+            success "Docker installed — re-login for group membership to take effect"
+            ;;
+        arch)
+            sudo pacman -S --noconfirm docker docker-compose
+            sudo systemctl enable --now docker
+            sudo usermod -aG docker "$USER"
+            success "Docker installed — re-login for group membership to take effect"
+            ;;
+        *)
+            manual "Install Docker manually: https://docs.docker.com/engine/install/"
+            ;;
+    esac
+}
+
 install_tfenv() {
     info "=== tfenv ==="
     if [[ ! -d "${HOME}/.tfenv" ]]; then
@@ -833,15 +887,21 @@ setup_clipboard_helper() {
     mkdir -p "$LOCAL_BIN"
     cat > "$LOCAL_BIN/tmux-clipboard" <<'EOF'
 #!/bin/sh
-# Route clipboard writes to the correct backend at runtime
+# Route clipboard writes to the correct backend at runtime.
+# Buffer stdin first so we can choose the backend before consuming it.
+buf=$(cat)
 if [ -n "$WAYLAND_DISPLAY" ] && command -v wl-copy >/dev/null 2>&1; then
-    wl-copy
-elif command -v xclip >/dev/null 2>&1; then
-    xclip -in -selection clipboard
+    printf '%s' "$buf" | wl-copy
+elif [ -n "$DISPLAY" ] && command -v xclip >/dev/null 2>&1; then
+    printf '%s' "$buf" | xclip -in -selection clipboard
+else
+    # Headless / SSH: emit OSC 52 so the host terminal receives the clipboard data
+    encoded=$(printf '%s' "$buf" | base64 | tr -d '\n')
+    printf '\033]52;c;%s\a' "$encoded"
 fi
 EOF
     chmod 755 "$LOCAL_BIN/tmux-clipboard"
-    success "clipboard helper installed (Wayland + X11)"
+    success "clipboard helper installed (Wayland + X11 + OSC 52)"
 }
 
 setup_tmux_config() {
@@ -970,6 +1030,7 @@ EOF
     install_goenv
     install_sdkman
     install_tfenv
+    install_docker
 
     echo ""
     info "--- Configuring dotfiles ---"

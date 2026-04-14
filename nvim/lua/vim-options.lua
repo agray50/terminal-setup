@@ -30,6 +30,17 @@ vim.opt.undofile = true
 vim.opt.mouse = "a"
 vim.opt.clipboard = "unnamedplus"
 
+-- When SSH'd in there is no local display server; use OSC 52 so yanks reach
+-- the host terminal clipboard instead of silently going nowhere.
+if vim.env.SSH_TTY ~= nil or vim.env.SSH_CLIENT ~= nil then
+    local osc52 = require("vim.ui.clipboard.osc52")
+    vim.g.clipboard = {
+        name = "OSC 52",
+        copy  = { ["+"] = osc52.copy("+"),  ["*"] = osc52.copy("*")  },
+        paste = { ["+"] = osc52.paste("+"), ["*"] = osc52.paste("*") },
+    }
+end
+
 -- Folding — method/expr set per-buffer in treesitter FileType autocmd;
 -- these globals keep all folds open by default
 vim.opt.foldlevel = 99
