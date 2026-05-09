@@ -519,34 +519,22 @@ install_rust() {
 
 install_tree_sitter_cli() {
     info "=== tree-sitter-cli ==="
-    local os arch tag asset url tmpfile
-    os=$(detect_os)
-    local asset_os; [[ "$os" == "macos" ]] && asset_os="macos" || asset_os="linux"
-    case "$(uname -m)" in
-        x86_64) arch="x64" ;;
-        arm64|aarch64) arch="arm64" ;;
-        *) warn "Unsupported arch for tree-sitter-cli: $(uname -m)"; return 0 ;;
-    esac
-
-    tag=$(github_latest_tag "tree-sitter/tree-sitter")
-    if [[ -z "$tag" ]]; then
-        warn "Could not resolve tree-sitter-cli version — skipping"
+    local cargo="${HOME}/.cargo/bin/cargo"
+    if [[ ! -f "$cargo" ]]; then
+        warn "cargo not found — skipping tree-sitter-cli (Rust must be installed first)"
         return 0
     fi
 
-    version_up_to_date "tree-sitter" "$tag" "$("$LOCAL_BIN/tree-sitter" --version 2>/dev/null | head -1)" && return 0
+    if "$cargo" install --list 2>/dev/null | grep -q '^tree-sitter-cli '; then
+        success "tree-sitter-cli already installed"
+    else
+        "$cargo" install tree-sitter-cli
+        success "tree-sitter-cli installed"
+    fi
 
-    asset="tree-sitter-${asset_os}-${arch}.gz"
-    url="https://github.com/tree-sitter/tree-sitter/releases/download/${tag}/${asset}"
-
-    tmpfile=$(mktemp)
-    curl -fsSL "$url" -o "${tmpfile}.gz"
-    gunzip -f "${tmpfile}.gz"
+    # Symlink into LOCAL_BIN so it's available before cargo env is sourced in new shells
     mkdir -p "$LOCAL_BIN"
-    mv "$tmpfile" "$LOCAL_BIN/tree-sitter"
-    chmod 755 "$LOCAL_BIN/tree-sitter"
-    rm -f "$tmpfile" "${tmpfile}.gz" 2>/dev/null || true
-    success "tree-sitter-cli ${tag} installed"
+    ln -sf "${HOME}/.cargo/bin/tree-sitter" "$LOCAL_BIN/tree-sitter"
 }
 
 install_nvm() {
@@ -587,6 +575,16 @@ export PYENV_ROOT="$HOME/.pyenv"
 eval "$(pyenv init -)"
 EOF
 )" "${HOME}/.zshrc"
+
+    # pyenv builds Python from source — surface the required packages per distro
+    case "$(detect_os)" in
+        debian)
+            manual "pyenv Python build deps (Debian/Ubuntu): sudo apt-get install -y build-essential libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev" ;;
+        fedora)
+            manual "pyenv Python build deps (Fedora/RHEL/yum): sudo dnf install -y gcc make patch zlib-devel bzip2 bzip2-devel readline-devel sqlite sqlite-devel openssl-devel tk-devel libffi-devel xz-devel libuuid-devel gdbm-libs libnsl2" ;;
+        arch)
+            manual "pyenv Python build deps (Arch): sudo pacman -S --needed base-devel openssl zlib xz tk" ;;
+    esac
 }
 
 install_goenv() {
@@ -606,6 +604,16 @@ export GOENV_PATH_ORDER=front
 eval "$(goenv init -)"
 EOF
 )" "${HOME}/.zshrc"
+
+    # goenv downloads pre-built Go binaries but needs gcc/make for cgo-based tooling
+    case "$(detect_os)" in
+        debian)
+            manual "goenv build deps (Debian/Ubuntu): sudo apt-get install -y build-essential" ;;
+        fedora)
+            manual "goenv build deps (Fedora/RHEL/yum): sudo dnf install -y gcc make" ;;
+        arch)
+            manual "goenv build deps (Arch): sudo pacman -S --needed base-devel" ;;
+    esac
 }
 
 install_sdkman() {
@@ -772,8 +780,8 @@ alias tfp='terraform plan'
 alias tfa='terraform apply'
 alias tfd='terraform destroy'
 
-# neovim + fzf
-alias nf='nvim $(fzf --preview "bat --color=always --style=numbers --line-range=:500 {}")'
+# neovim
+alias gg='nvim -c "Git"'
 alias gg='nvim -c "Git"'
 EOF
 )" "${HOME}/.zshrc"
@@ -790,10 +798,20 @@ fh() {
     print -z $(fc -ln 1 | fzf --tac --no-sort)
 }
 
-# fcd — fuzzy cd into any subdirectory
+# nf — fuzzy find file and open in nvim; optional first arg scopes the search root
+nf() {
+    local root="${1:-.}"
+    local file
+    file=$(fd --type f --hidden --exclude .git . "$root" 2>/dev/null \
+        | fzf --preview "bat --color=always --style=numbers --line-range=:500 {}")
+    [[ -n "$file" ]] && nvim "$file"
+}
+
+# fcd — fuzzy cd; optional first arg scopes the search root (default: current dir)
 fcd() {
+    local root="${1:-.}"
     local dir
-    dir=$(fd --type d --hidden --exclude .git 2>/dev/null \
+    dir=$(fd --type d --hidden --exclude .git . "$root" 2>/dev/null \
         | fzf --preview 'eza --tree --level=2 --icons {}')
     [[ -n "$dir" ]] && cd "$dir"
 }
