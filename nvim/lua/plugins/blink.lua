@@ -23,7 +23,10 @@ return {
 
 			signature = { enabled = true },
 
-			completion = { documentation = { auto_show = true } },
+			completion = {
+				documentation = { auto_show = true },
+				accept = { auto_brackets = { enabled = true } },
+			},
 
 			sources = {
 				default = { "lsp", "path", "snippets", "buffer" },
