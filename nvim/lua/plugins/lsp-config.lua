@@ -12,6 +12,15 @@ return {
 					"-data",
 					vim.fn.stdpath("data") .. "/jdtls-workspace/" .. vim.fn.fnamemodify(vim.fn.getcwd(), ":t"),
 				},
+				-- Disable jdtls's background builder so it never writes .class files
+				-- to target/classes, where it can race with and corrupt Maven's own
+				-- build output. Diagnostics/completion still work via jdtls's
+				-- in-memory compiler; only the on-disk incremental build is disabled.
+				settings = {
+					java = {
+						autobuild = { enabled = false },
+					},
+				},
 			})
 
 			vim.lsp.config("helm_ls", {
