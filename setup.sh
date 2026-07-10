@@ -16,6 +16,18 @@ MANUAL_STEPS=()
 
 NVIM_MINOR="v0.12."  # Pinned minor series — bump manually when ready to move to 0.13+
 
+DRY_RUN=false
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY_RUN=true ;;
+        --help|-h)
+            echo "Usage: $0 [--dry-run]"
+            echo "  --dry-run   Show what would be installed/changed without changing anything"
+            exit 0
+            ;;
+    esac
+done
+
 # -----------------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------------
@@ -86,19 +98,44 @@ detect_rust_target() {
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
+# Execute (or, in --dry-run mode, just log) a mutating command
+run() {
+    if $DRY_RUN; then
+        info "[dry-run] would run: $*"
+    else
+        "$@"
+    fi
+}
+
 # Append line to file only if not already present
 add_line() {
-    grep -qF "$1" "$2" 2>/dev/null || echo "$1" >> "$2"
+    if grep -qF "$1" "$2" 2>/dev/null; then
+        return 0
+    elif $DRY_RUN; then
+        info "[dry-run] would append to $2: $1"
+    else
+        echo "$1" >> "$2"
+    fi
 }
 
 # Append block to file only if marker line is not already present
 add_block() {
     local marker="$1" content="$2" file="$3"
-    grep -qF "$marker" "$file" 2>/dev/null || printf '\n%s\n' "$content" >> "$file"
+    if grep -qF "$marker" "$file" 2>/dev/null; then
+        return 0
+    elif $DRY_RUN; then
+        info "[dry-run] would append block '$marker' to $file"
+    else
+        printf '\n%s\n' "$content" >> "$file"
+    fi
 }
 
 backup_if_exists() {
     [[ -e "$1" ]] || return 0
+    if $DRY_RUN; then
+        info "[dry-run] would back up $1 to $BACKUP_DIR"
+        return 0
+    fi
     mkdir -p "$BACKUP_DIR"
     cp -r "$1" "$BACKUP_DIR/$(basename "$1")"
     info "Backed up $1"
@@ -149,6 +186,10 @@ version_up_to_date() {
 # In-place sed that works on both GNU (Linux) and BSD (macOS) sed
 sed_inplace() {
     local expr="$1" file="$2"
+    if $DRY_RUN; then
+        info "[dry-run] would edit $file: $expr"
+        return 0
+    fi
     if [[ "$(detect_os)" == "macos" ]]; then
         sed -i '' "$expr" "$file"
     else
@@ -162,6 +203,10 @@ sed_inplace() {
 
 pkg_install() {
     local pkg="$1" os="${2:-$(detect_os)}"
+    if $DRY_RUN; then
+        info "[dry-run] would install package '$pkg' via ${os}'s package manager"
+        return 0
+    fi
     case "$os" in
         macos)   brew install "$pkg" ;;
         debian)  sudo apt-get install -y "$pkg" ;;
@@ -178,6 +223,11 @@ pkg_install() {
 # Download a .tar.gz archive, find a named binary inside, install to LOCAL_BIN
 install_from_tarball() {
     local url="$1" binary="$2"
+    if $DRY_RUN; then
+        info "[dry-run] would download and install '$binary' from $url"
+        return 0
+    fi
+
     local tmpdir
     tmpdir=$(mktemp -d)
 
@@ -202,6 +252,10 @@ install_from_tarball() {
 # Download a single binary file directly to LOCAL_BIN
 install_from_binary_url() {
     local url="$1" binary="$2"
+    if $DRY_RUN; then
+        info "[dry-run] would download '$binary' from $url"
+        return 0
+    fi
     mkdir -p "$LOCAL_BIN"
     curl -fsSL "$url" -o "$LOCAL_BIN/$binary"
     chmod 755 "$LOCAL_BIN/$binary"
@@ -222,8 +276,18 @@ install_zsh() {
     local zsh_path
     zsh_path=$(command -v zsh)
     if [[ "$SHELL" != "$zsh_path" ]]; then
-        grep -qF "$zsh_path" /etc/shells || echo "$zsh_path" | sudo tee -a /etc/shells >/dev/null
-        chsh -s "$zsh_path" || warn "chsh failed — on directory-managed systems (e.g. Amazon Workspaces) set your default shell manually (see below)"
+        if grep -qF "$zsh_path" /etc/shells 2>/dev/null; then
+            :
+        elif $DRY_RUN; then
+            info "[dry-run] would add $zsh_path to /etc/shells"
+        else
+            echo "$zsh_path" | sudo tee -a /etc/shells >/dev/null
+        fi
+        if $DRY_RUN; then
+            info "[dry-run] would run: chsh -s $zsh_path"
+        else
+            chsh -s "$zsh_path" || warn "chsh failed — on directory-managed systems (e.g. Amazon Workspaces) set your default shell manually (see below)"
+        fi
         warn "Log out and back in for the shell change to take effect"
     fi
 }
@@ -234,6 +298,10 @@ install_ohmyzsh() {
         success "oh-my-zsh already installed"
         return 0
     fi
+    if $DRY_RUN; then
+        info "[dry-run] would install oh-my-zsh"
+        return 0
+    fi
     RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
     success "oh-my-zsh installed"
 }
@@ -242,10 +310,10 @@ install_powerlevel10k() {
     info "=== powerlevel10k ==="
     local dir="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
     if [[ ! -d "$dir" ]]; then
-        git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$dir"
+        run git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$dir"
         success "powerlevel10k installed"
     else
-        git -C "$dir" pull --ff-only --quiet && success "powerlevel10k updated"
+        run git -C "$dir" pull --ff-only --quiet && success "powerlevel10k updated"
     fi
 
     if [[ -f "${HOME}/.zshrc" ]] && ! grep -q '^ZSH_THEME="powerlevel10k/powerlevel10k"' "${HOME}/.zshrc"; then
@@ -253,7 +321,7 @@ install_powerlevel10k() {
     fi
 
     if [[ -f "${SCRIPT_DIR}/p10k.zsh" ]]; then
-        cp "${SCRIPT_DIR}/p10k.zsh" "${HOME}/.p10k.zsh"
+        run cp "${SCRIPT_DIR}/p10k.zsh" "${HOME}/.p10k.zsh"
         success "p10k.zsh installed"
     else
         manual "Run 'p10k configure' to set up your prompt"
@@ -267,24 +335,34 @@ install_zsh_plugins() {
     local custom="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins"
 
     if [[ ! -d "$custom/zsh-syntax-highlighting" ]]; then
-        git clone https://github.com/zsh-users/zsh-syntax-highlighting.git "$custom/zsh-syntax-highlighting"
+        run git clone https://github.com/zsh-users/zsh-syntax-highlighting.git "$custom/zsh-syntax-highlighting"
         success "zsh-syntax-highlighting installed"
     else
-        git -C "$custom/zsh-syntax-highlighting" pull --ff-only --quiet && success "zsh-syntax-highlighting updated"
+        run git -C "$custom/zsh-syntax-highlighting" pull --ff-only --quiet && success "zsh-syntax-highlighting updated"
     fi
 
     if [[ ! -d "$custom/zsh-autosuggestions" ]]; then
-        git clone https://github.com/zsh-users/zsh-autosuggestions "$custom/zsh-autosuggestions"
+        run git clone https://github.com/zsh-users/zsh-autosuggestions "$custom/zsh-autosuggestions"
         success "zsh-autosuggestions installed"
     else
-        git -C "$custom/zsh-autosuggestions" pull --ff-only --quiet && success "zsh-autosuggestions updated"
+        run git -C "$custom/zsh-autosuggestions" pull --ff-only --quiet && success "zsh-autosuggestions updated"
     fi
 
     if [[ -f "${HOME}/.zshrc" ]]; then
-        grep -q "zsh-syntax-highlighting" "${HOME}/.zshrc" || \
+        if grep -q "zsh-syntax-highlighting" "${HOME}/.zshrc"; then
+            :
+        elif $DRY_RUN; then
+            info "[dry-run] would add zsh-syntax-highlighting to .zshrc plugins list"
+        else
             perl -i -pe 's/^(plugins=\()(.+)(\))/$1$2 zsh-syntax-highlighting$3/' "${HOME}/.zshrc"
-        grep -q "zsh-autosuggestions" "${HOME}/.zshrc" || \
+        fi
+        if grep -q "zsh-autosuggestions" "${HOME}/.zshrc"; then
+            :
+        elif $DRY_RUN; then
+            info "[dry-run] would add zsh-autosuggestions to .zshrc plugins list"
+        else
             perl -i -pe 's/^(plugins=\()(.+)(\))/$1$2 zsh-autosuggestions$3/' "${HOME}/.zshrc"
+        fi
     fi
 }
 
@@ -303,7 +381,11 @@ install_bash() {
         success "bash already at version $current_version"
         return 0
     fi
-    brew list bash &>/dev/null || brew install bash
+    if brew list bash &>/dev/null; then
+        :
+    else
+        run brew install bash
+    fi
     success "bash upgraded"
 }
 
@@ -313,24 +395,32 @@ install_fzf() {
     tag=$(github_latest_tag "junegunn/fzf")
 
     if [[ ! -d "${HOME}/.fzf" ]]; then
-        git clone --depth 1 https://github.com/junegunn/fzf.git "${HOME}/.fzf"
+        run git clone --depth 1 https://github.com/junegunn/fzf.git "${HOME}/.fzf"
     else
-        git -C "${HOME}/.fzf" pull --ff-only --quiet
+        run git -C "${HOME}/.fzf" pull --ff-only --quiet
         # Skip binary download if already at latest
         version_up_to_date "fzf" "$tag" "$("$LOCAL_BIN/fzf" --version 2>/dev/null | head -1)" && needs_binary=false
     fi
 
     if $needs_binary; then
-        "${HOME}/.fzf/install" --bin
+        run "${HOME}/.fzf/install" --bin
         success "fzf ${tag} installed"
     fi
 
-    mkdir -p "$LOCAL_BIN"
-    ln -sf "${HOME}/.fzf/bin/fzf" "$LOCAL_BIN/fzf"
+    if $DRY_RUN; then
+        info "[dry-run] would symlink ${HOME}/.fzf/bin/fzf -> $LOCAL_BIN/fzf"
+    else
+        mkdir -p "$LOCAL_BIN"
+        ln -sf "${HOME}/.fzf/bin/fzf" "$LOCAL_BIN/fzf"
+    fi
 
     # Remove legacy fzf shell integration lines (replaced by explicit functions in setup_zsh_functions)
     if [[ -f "${HOME}/.zshrc" ]]; then
-        perl -i -ne 'print unless /\[ -f ~\/\.fzf\.zsh \]/ || /eval "\$\(fzf --zsh\)"/' "${HOME}/.zshrc"
+        if $DRY_RUN; then
+            info "[dry-run] would strip legacy fzf shell-integration lines from .zshrc"
+        else
+            perl -i -ne 'print unless /\[ -f ~\/\.fzf\.zsh \]/ || /eval "\$\(fzf --zsh\)"/' "${HOME}/.zshrc"
+        fi
     fi
 }
 
@@ -353,6 +443,11 @@ install_neovim() {
         url="https://github.com/neovim/neovim/releases/download/${tag}/nvim-macos-${arch}.tar.gz"
     else
         url="https://github.com/neovim/neovim/releases/download/${tag}/nvim-linux-${arch}.tar.gz"
+    fi
+
+    if $DRY_RUN; then
+        info "[dry-run] would download and install neovim ${tag} from $url"
+        return 0
     fi
 
     local tmpdir; tmpdir=$(mktemp -d)
@@ -416,7 +511,11 @@ install_eza() {
 
     if [[ "$os" == "macos" ]]; then
         # No macOS binaries in eza releases — brew is the only option
-        brew upgrade eza 2>/dev/null || brew install eza
+        if $DRY_RUN; then
+            info "[dry-run] would run: brew upgrade/install eza"
+        else
+            brew upgrade eza 2>/dev/null || brew install eza
+        fi
         success "eza ${tag} installed"
         return 0
     fi
@@ -494,10 +593,10 @@ install_tpm() {
     info "=== tpm ==="
     local dir="${HOME}/.tmux/plugins/tpm"
     if [[ ! -d "$dir" ]]; then
-        git clone https://github.com/tmux-plugins/tpm "$dir"
+        run git clone https://github.com/tmux-plugins/tpm "$dir"
         success "tpm installed"
     else
-        git -C "$dir" pull --ff-only --quiet && success "tpm updated"
+        run git -C "$dir" pull --ff-only --quiet && success "tpm updated"
     fi
 }
 
@@ -509,6 +608,8 @@ install_rust() {
     info "=== Rust ==="
     if [[ -f "${HOME}/.cargo/bin/cargo" ]]; then
         success "Rust already installed"
+    elif $DRY_RUN; then
+        info "[dry-run] would install Rust via rustup"
     else
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
         success "Rust installed"
@@ -528,19 +629,25 @@ install_tree_sitter_cli() {
     if "$cargo" install --list 2>/dev/null | grep -q '^tree-sitter-cli '; then
         success "tree-sitter-cli already installed"
     else
-        "$cargo" install tree-sitter-cli
+        run "$cargo" install tree-sitter-cli
         success "tree-sitter-cli installed"
     fi
 
     # Symlink into LOCAL_BIN so it's available before cargo env is sourced in new shells
-    mkdir -p "$LOCAL_BIN"
-    ln -sf "${HOME}/.cargo/bin/tree-sitter" "$LOCAL_BIN/tree-sitter"
+    if $DRY_RUN; then
+        info "[dry-run] would symlink ${HOME}/.cargo/bin/tree-sitter -> $LOCAL_BIN/tree-sitter"
+    else
+        mkdir -p "$LOCAL_BIN"
+        ln -sf "${HOME}/.cargo/bin/tree-sitter" "$LOCAL_BIN/tree-sitter"
+    fi
 }
 
 install_nvm() {
     info "=== nvm ==="
     if [[ -d "${HOME}/.nvm" ]]; then
         success "nvm already installed"
+    elif $DRY_RUN; then
+        info "[dry-run] would install nvm"
     else
         local tag
         tag=$(github_latest_tag "nvm-sh/nvm")
@@ -549,12 +656,21 @@ install_nvm() {
     fi
 
     # nvm's installer may have already written its init block to .zshrc (when $SHELL=zsh);
-    # check for the sourced script rather than our marker to avoid duplicates
+    # check for the sourced script rather than our marker to avoid duplicates.
+    # Sourcing nvm.sh is real shell-startup cost, so defer it behind a lazy-loading
+    # stub that only runs on first actual use of nvm/node/npm/npx.
     grep -qF 'nvm.sh' "${HOME}/.zshrc" 2>/dev/null || add_block "# nvm" "$(cat <<'EOF'
-# nvm
+# nvm (lazy-loaded on first use)
 export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+_nvm_lazy_load() {
+    unset -f nvm node npm npx _nvm_lazy_load
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+    [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+}
+nvm()  { _nvm_lazy_load; nvm "$@"; }
+node() { _nvm_lazy_load; node "$@"; }
+npm()  { _nvm_lazy_load; npm "$@"; }
+npx()  { _nvm_lazy_load; npx "$@"; }
 EOF
 )" "${HOME}/.zshrc"
 }
@@ -563,16 +679,28 @@ install_pyenv() {
     info "=== pyenv ==="
     if [[ -d "${HOME}/.pyenv" ]]; then
         success "pyenv already installed"
+    elif $DRY_RUN; then
+        info "[dry-run] would install pyenv"
     else
         curl https://pyenv.run | bash
         success "pyenv installed"
     fi
 
+    # `pyenv init -` forks pyenv and evals its output on every shell startup;
+    # defer that behind a lazy-loading stub that runs on first actual use.
     add_block "# pyenv" "$(cat <<'EOF'
-# pyenv
+# pyenv (lazy-loaded on first use)
 export PYENV_ROOT="$HOME/.pyenv"
 [[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
-eval "$(pyenv init -)"
+_pyenv_lazy_load() {
+    unset -f pyenv python python3 pip pip3 _pyenv_lazy_load
+    eval "$(command pyenv init -)"
+}
+pyenv()   { _pyenv_lazy_load; pyenv "$@"; }
+python()  { _pyenv_lazy_load; python "$@"; }
+python3() { _pyenv_lazy_load; python3 "$@"; }
+pip()     { _pyenv_lazy_load; pip "$@"; }
+pip3()    { _pyenv_lazy_load; pip3 "$@"; }
 EOF
 )" "${HOME}/.zshrc"
 
@@ -590,18 +718,25 @@ EOF
 install_goenv() {
     info "=== goenv ==="
     if [[ ! -d "${HOME}/.goenv" ]]; then
-        git clone --depth=1 https://github.com/go-nv/goenv.git "${HOME}/.goenv"
+        run git clone --depth=1 https://github.com/go-nv/goenv.git "${HOME}/.goenv"
         success "goenv installed"
     else
-        git -C "${HOME}/.goenv" pull --ff-only --quiet && success "goenv updated"
+        run git -C "${HOME}/.goenv" pull --ff-only --quiet && success "goenv updated"
     fi
 
+    # `goenv init -` forks goenv and evals its output on every shell startup;
+    # defer that behind a lazy-loading stub that runs on first actual use.
     add_block "# goenv" "$(cat <<'EOF'
-# goenv
+# goenv (lazy-loaded on first use)
 export GOENV_ROOT="$HOME/.goenv"
 export PATH="$GOENV_ROOT/bin:$PATH"
 export GOENV_PATH_ORDER=front
-eval "$(goenv init -)"
+_goenv_lazy_load() {
+    unset -f goenv go _goenv_lazy_load
+    eval "$(command goenv init -)"
+}
+goenv() { _goenv_lazy_load; goenv "$@"; }
+go()    { _goenv_lazy_load; go "$@"; }
 EOF
 )" "${HOME}/.zshrc"
 
@@ -620,6 +755,8 @@ install_sdkman() {
     info "=== SDKMAN ==="
     if [[ -d "${HOME}/.sdkman" ]]; then
         success "SDKMAN already installed"
+    elif $DRY_RUN; then
+        info "[dry-run] would install SDKMAN"
     else
         command_exists zip  || pkg_install "zip"
         command_exists unzip || pkg_install "unzip"
@@ -632,7 +769,12 @@ install_sdkman() {
     fi
 
     # SDKMAN's installer may have already written its init block to .zshrc;
-    # check for the sourced script rather than our marker to avoid duplicates
+    # check for the sourced script rather than our marker to avoid duplicates.
+    # Deliberately NOT lazy-loaded like nvm/pyenv/goenv above: SDKMAN manages
+    # JAVA_HOME/PATH for java/javac/mvn/gradle, and project wrapper scripts
+    # (./mvnw, ./gradlew) invoke those directly rather than through a shell
+    # function, so they wouldn't trigger a lazy stub. Given heavy day-to-day
+    # Java use, deferring this risks JAVA_HOME being unset in a fresh shell.
     grep -qF 'sdkman-init.sh' "${HOME}/.zshrc" 2>/dev/null || add_block "# SDKMAN" "$(cat <<'EOF'
 # SDKMAN
 export SDKMAN_DIR="$HOME/.sdkman"
@@ -650,6 +792,11 @@ install_docker() {
 
     local os
     os=$(detect_os)
+
+    if $DRY_RUN && [[ "$os" != "macos" ]]; then
+        info "[dry-run] would install Docker via ${os}'s package manager (multiple sudo steps: repo setup, package install, enable service, add \$USER to docker group)"
+        return 0
+    fi
 
     case "$os" in
         macos)
@@ -698,10 +845,15 @@ $(. /etc/os-release && echo "${VERSION_CODENAME}") stable" \
 install_tfenv() {
     info "=== tfenv ==="
     if [[ ! -d "${HOME}/.tfenv" ]]; then
-        git clone --depth=1 https://github.com/tfutils/tfenv.git "${HOME}/.tfenv"
+        run git clone --depth=1 https://github.com/tfutils/tfenv.git "${HOME}/.tfenv"
         success "tfenv installed"
     else
-        git -C "${HOME}/.tfenv" pull --ff-only --quiet && success "tfenv updated"
+        run git -C "${HOME}/.tfenv" pull --ff-only --quiet && success "tfenv updated"
+    fi
+
+    if $DRY_RUN; then
+        info "[dry-run] would symlink tfenv binaries into $LOCAL_BIN"
+        return 0
     fi
 
     mkdir -p "$LOCAL_BIN"
@@ -718,11 +870,15 @@ install_tfenv() {
 
 setup_local_bin() {
     info "=== local bin ==="
-    mkdir -p "$LOCAL_BIN"
     # Always remove then re-append so ~/.local/bin ends up at the bottom of
     # .zshrc — sourced last means it prepends last, giving it priority over
     # Homebrew and any other PATH block written earlier.
     local line='export PATH="$HOME/.local/bin:$PATH"' zshrc="${HOME}/.zshrc"
+    if $DRY_RUN; then
+        info "[dry-run] would ensure $LOCAL_BIN exists and re-append its PATH line to $zshrc"
+        return 0
+    fi
+    mkdir -p "$LOCAL_BIN"
     grep -vF "$line" "$zshrc" > "${zshrc}.tmp" 2>/dev/null && mv "${zshrc}.tmp" "$zshrc" || true
     echo "$line" >> "$zshrc"
 }
@@ -874,6 +1030,9 @@ setup_nvim_config() {
 
     if [[ -L "$target" && "$(readlink "$target")" == "$source" ]]; then
         success "Neovim config symlink already correct"
+    elif $DRY_RUN; then
+        backup_if_exists "$target"
+        info "[dry-run] would symlink $target -> $source"
     else
         backup_if_exists "$target"
         rm -rf "$target"
@@ -882,7 +1041,9 @@ setup_nvim_config() {
         success "Neovim config symlinked: $target -> $source"
     fi
 
-    if command_exists nvim; then
+    if $DRY_RUN; then
+        info "[dry-run] would run: nvim --headless '+Lazy! restore'"
+    elif command_exists nvim; then
         info "Restoring plugins from lock file..."
         nvim --headless "+Lazy! restore" +qa 2>/dev/null \
             || warn "Lazy restore had issues; open nvim to resolve"
@@ -900,6 +1061,11 @@ setup_clipboard_helper() {
     # Install both clipboard backends: xclip (X11) and wl-clipboard (Wayland)
     command_exists xclip    || pkg_install "xclip"
     command_exists wl-copy  || pkg_install "wl-clipboard"
+
+    if $DRY_RUN; then
+        info "[dry-run] would write clipboard helper to $LOCAL_BIN/tmux-clipboard"
+        return 0
+    fi
 
     # Write a runtime-detection wrapper so tmux works on both X11 and Wayland
     mkdir -p "$LOCAL_BIN"
@@ -933,7 +1099,7 @@ setup_tmux_config() {
     fi
 
     backup_if_exists "$target"
-    cp "$source" "$target"
+    run cp "$source" "$target"
 
     # On Linux replace pbcopy with the cross-display-server clipboard helper
     if [[ "$(detect_os)" != "macos" ]]; then
@@ -943,7 +1109,9 @@ setup_tmux_config() {
     success "tmux config installed"
 
     local tpm_install="${HOME}/.tmux/plugins/tpm/bin/install_plugins"
-    if [[ -x "$tpm_install" ]]; then
+    if $DRY_RUN; then
+        info "[dry-run] would run tpm's install_plugins if available"
+    elif [[ -x "$tpm_install" ]]; then
         "$tpm_install" || warn "tpm plugin install had issues"
         success "tmux plugins installed"
     else
@@ -994,13 +1162,19 @@ main() {
 
     case "$os" in
         macos)
-            command_exists brew || {
+            if command_exists brew; then
+                :
+            elif $DRY_RUN; then
+                info "[dry-run] would install Homebrew"
+            else
                 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-            }
-            # Always ensure brew is on PATH for this session
-            [[ -f /opt/homebrew/bin/brew ]] \
-                && eval "$(/opt/homebrew/bin/brew shellenv)" \
-                || eval "$(/usr/local/bin/brew shellenv)"
+            fi
+            # Ensure brew is on PATH for the rest of this run (only if it's actually installed)
+            if [[ -f /opt/homebrew/bin/brew ]]; then
+                eval "$(/opt/homebrew/bin/brew shellenv)"
+            elif [[ -f /usr/local/bin/brew ]]; then
+                eval "$(/usr/local/bin/brew shellenv)"
+            fi
             # Add Homebrew bin to PATH permanently in .zshrc
             add_block "# Homebrew" "$(cat <<'EOF'
 # Homebrew — Apple Silicon uses /opt/homebrew, Intel uses /usr/local
@@ -1009,17 +1183,29 @@ main() {
 EOF
 )" "${HOME}/.zshrc"
             # tfenv requires GNU grep; macOS ships with BSD grep
-            brew list grep &>/dev/null || brew install grep
+            if command_exists brew && brew list grep &>/dev/null; then
+                :
+            else
+                run brew install grep
+            fi
             # Add GNU grep to PATH so it takes precedence over BSD grep
             add_line 'export PATH="$(brew --prefix)/opt/grep/libexec/gnubin:$PATH"' "${HOME}/.zshrc"
             ;;
         debian)
-            sudo apt-get update -qq || warn "apt-get update had errors — check /etc/apt/sources.list.d/ for misconfigured repos"
-            sudo apt-get install -y --no-install-recommends build-essential
+            if $DRY_RUN; then
+                info "[dry-run] would run: sudo apt-get update && apt-get install -y build-essential"
+            else
+                sudo apt-get update -qq || warn "apt-get update had errors — check /etc/apt/sources.list.d/ for misconfigured repos"
+                sudo apt-get install -y --no-install-recommends build-essential
+            fi
             ;;
         fedora)
-            sudo dnf check-update -q || true
-            sudo dnf install -y make gcc
+            if $DRY_RUN; then
+                info "[dry-run] would run: sudo dnf install -y make gcc"
+            else
+                sudo dnf check-update -q || true
+                sudo dnf install -y make gcc
+            fi
             ;;
     esac
 

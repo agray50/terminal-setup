@@ -6,7 +6,6 @@ return {
 		"MunifTanjim/nui.nvim",
 		"nvim-tree/nvim-web-devicons",
 	},
-	lazy = false,
 	keys = {
 		{ "<C-n>", "<cmd>Neotree toggle<CR>", desc = "Toggle file explorer" },
 	},

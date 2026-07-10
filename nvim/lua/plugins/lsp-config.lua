@@ -16,6 +16,11 @@ return {
 			vim.lsp.config("jdtls", {
 				cmd = {
 					"jdtls",
+					-- jdtls's own compiler (ECJ) doesn't understand Lombok-generated
+					-- methods (e.g. @Getter/@Setter) unless Lombok is loaded as a
+					-- javaagent — without this, real getters/setters show as
+					-- "undefined" diagnostics even though Maven builds fine.
+					"--jvm-arg=-javaagent:" .. vim.fn.stdpath("data") .. "/mason/share/jdtls/lombok.jar",
 					"-data",
 					vim.fn.stdpath("data") .. "/jdtls-workspace/" .. vim.fn.fnamemodify(vim.fn.getcwd(), ":t"),
 				},

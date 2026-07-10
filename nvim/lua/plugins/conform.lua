@@ -29,7 +29,11 @@ return {
 			format_on_save = {
 				lsp_format = "fallback",
 				async = false,
-				timeout_ms = 3000,
+				-- java's spotless_maven/spotless_gradle formatters shell out to a
+				-- full Maven/Gradle process (JVM startup + plugin resolution), which
+				-- routinely takes several seconds — far past a typical formatter's
+				-- runtime — so this needs a generous ceiling to avoid timing out.
+				timeout_ms = 30000,
 			},
 		})
 
@@ -37,7 +41,7 @@ return {
 			conform.format({
 				lsp_format = "fallback",
 				async = false,
-				timeout_ms = 1000,
+				timeout_ms = 30000,
 			})
 		end, { desc = "Trigger formatting for current file or range" })
 	end,

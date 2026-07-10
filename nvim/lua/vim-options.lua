@@ -34,9 +34,30 @@ vim.opt.clipboard = "unnamedplus"
 -- the host terminal clipboard instead of silently going nowhere.
 if vim.env.SSH_TTY ~= nil or vim.env.SSH_CLIENT ~= nil then
     local osc52 = require("vim.ui.clipboard.osc52")
+    -- OSC 52 payloads are base64-encoded and written straight into the SSH
+    -- terminal stream; a huge yank turns into a huge escape sequence that
+    -- visibly stalls the session, so skip (and warn) above this size.
+    local OSC52_MAX_BYTES = 100 * 1024
+    local function guarded_copy(register)
+        local copy = osc52.copy(register)
+        return function(lines)
+            local size = 0
+            for _, line in ipairs(lines) do
+                size = size + #line + 1
+            end
+            if size > OSC52_MAX_BYTES then
+                vim.notify(
+                    string.format("OSC 52: skipped clipboard sync of %dKB yank (over SSH size limit)", size / 1024),
+                    vim.log.levels.WARN
+                )
+                return
+            end
+            copy(lines)
+        end
+    end
     vim.g.clipboard = {
         name = "OSC 52",
-        copy  = { ["+"] = osc52.copy("+"),  ["*"] = osc52.copy("*")  },
+        copy  = { ["+"] = guarded_copy("+"),  ["*"] = guarded_copy("*")  },
         paste = { ["+"] = osc52.paste("+"), ["*"] = osc52.paste("*") },
     }
 end

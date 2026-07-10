@@ -9,10 +9,33 @@ return {
 				"jay-babu/mason-nvim-dap.nvim",
 				dependencies = { "mason-org/mason.nvim" },
 				opts = {
-					-- auto-configure adapters installed via mason-tool-installer
 					handlers = {},
+					-- Install/configure these on first DAP use rather than via
+					-- mason-tool-installer, which would otherwise force this whole
+					-- plugin (and nvim-dap with it) to load on every startup.
+					ensure_installed = {
+						"codelldb",
+						"debugpy",
+						"delve",
+						"js-debug-adapter",
+						"bash-debug-adapter",
+					},
+					automatic_installation = true,
 				},
 			},
+		},
+		keys = {
+			{ "<leader>db", function() require("dap").toggle_breakpoint() end, desc = "󰝥 Toggle breakpoint" },
+			{ "<leader>dB", function() require("dap").set_breakpoint(vim.fn.input("Breakpoint condition: ")) end, desc = "󰟃 Conditional breakpoint" },
+			{ "<leader>dl", function() require("dap").set_breakpoint(nil, nil, vim.fn.input("Log message: ")) end, desc = "󰛿 Log point" },
+			{ "<leader>dc", function() require("dap").continue() end, desc = "󰐊 Continue / start" },
+			{ "<leader>di", function() require("dap").step_into() end, desc = "󰆹 Step into" },
+			{ "<leader>do", function() require("dap").step_over() end, desc = "󰆷 Step over" },
+			{ "<leader>dO", function() require("dap").step_out() end, desc = "󰆸 Step out" },
+			{ "<leader>dr", function() require("dap").restart() end, desc = "󰑓 Restart" },
+			{ "<leader>dq", function() require("dap").terminate() end, desc = "󰓛 Terminate" },
+			{ "<leader>du", function() require("dapui").toggle() end, desc = "󰙀 Toggle UI" },
+			{ "<leader>de", function() require("dapui").eval() end, mode = { "n", "v" }, desc = "󰆤 Eval expression" },
 		},
 		config = function()
 			local dap = require("dap")
@@ -38,27 +61,6 @@ return {
 			vim.fn.sign_define("DapLogPoint", { text = "󰛿", texthl = "DapLogPoint" })
 			vim.fn.sign_define("DapStopped", { text = "󰁕", texthl = "DapStopped", linehl = "DapStopped", numhl = "DapStopped" })
 			vim.fn.sign_define("DapBreakpointRejected", { text = "󰅗", texthl = "DapBreakpointRejected" })
-
-			-- Breakpoints
-			vim.keymap.set("n", "<leader>db", dap.toggle_breakpoint, { desc = "󰝥 Toggle breakpoint" })
-			vim.keymap.set("n", "<leader>dB", function()
-				dap.set_breakpoint(vim.fn.input("Breakpoint condition: "))
-			end, { desc = "󰟃 Conditional breakpoint" })
-			vim.keymap.set("n", "<leader>dl", function()
-				dap.set_breakpoint(nil, nil, vim.fn.input("Log message: "))
-			end, { desc = "󰛿 Log point" })
-
-			-- Session control
-			vim.keymap.set("n", "<leader>dc", dap.continue, { desc = "󰐊 Continue / start" })
-			vim.keymap.set("n", "<leader>di", dap.step_into, { desc = "󰆹 Step into" })
-			vim.keymap.set("n", "<leader>do", dap.step_over, { desc = "󰆷 Step over" })
-			vim.keymap.set("n", "<leader>dO", dap.step_out, { desc = "󰆸 Step out" })
-			vim.keymap.set("n", "<leader>dr", dap.restart, { desc = "󰑓 Restart" })
-			vim.keymap.set("n", "<leader>dq", dap.terminate, { desc = "󰓛 Terminate" })
-
-			-- UI
-			vim.keymap.set("n", "<leader>du", dapui.toggle, { desc = "󰙀 Toggle UI" })
-			vim.keymap.set({ "n", "v" }, "<leader>de", dapui.eval, { desc = "󰆤 Eval expression" })
 		end,
 	},
 }

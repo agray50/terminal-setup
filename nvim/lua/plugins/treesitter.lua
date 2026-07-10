@@ -9,12 +9,26 @@ return {
 
 			-- Only attempt parser installation if tree-sitter CLI is available
 			if vim.fn.executable("tree-sitter") == 1 then
-				require("nvim-treesitter").install({
+				local wanted = {
 					"bash", "c", "diff", "go", "html", "javascript", "jsdoc",
 					"json", "json5", "lua", "luadoc", "luap", "markdown",
 					"markdown_inline", "printf", "python", "query", "regex",
 					"toml", "tsx", "typescript", "vim", "vimdoc", "xml", "yaml",
-				})
+				}
+				local installed = {}
+				for _, parser in ipairs(require("nvim-treesitter").get_installed("parsers")) do
+					installed[parser] = true
+				end
+				local missing = {}
+				for _, parser in ipairs(wanted) do
+					if not installed[parser] then
+						table.insert(missing, parser)
+					end
+				end
+				-- Skip the installer entirely when every wanted parser is already present
+				if #missing > 0 then
+					require("nvim-treesitter").install(missing)
+				end
 			else
 				vim.notify("nvim-treesitter: tree-sitter CLI not found in PATH — re-run setup.sh or install manually from https://github.com/tree-sitter/tree-sitter/releases", vim.log.levels.WARN)
 			end
