@@ -50,11 +50,13 @@ return {
 				"goimports",
 				"rustfmt",
 				"shfmt",
+				"google-java-format",
 				-- Linters
 				"pylint",
 				"yamllint",
 				"golangci-lint",
 				"shellcheck",
+				"checkstyle",
 				-- DAP adapters
 				"codelldb",
 				"debugpy",

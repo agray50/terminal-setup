@@ -6,6 +6,7 @@ return {
 
 		lint.linters_by_ft = {
 			python = { "pylint" },
+			java = { "checkstyle" },
 			-- JS/TS: eslint LSP handles diagnostics + code actions; no separate linter needed
 			yaml = { "yamllint" },
 			go = { "golangci_lint" },

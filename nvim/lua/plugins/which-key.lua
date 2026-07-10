@@ -10,7 +10,7 @@ return {
 				{ "<leader>g", group = "git" },
 				{ "<leader>h", group = "hunk (gitsigns)" },
 				{ "<leader>k", group = "lsp" },
-				{ "<leader>m", group = "format" },
+				{ "<leader>l", group = "lint & format" },
 				{ "<leader>t", group = "toggle" },
 				{ "<leader>Q", desc = "Close all tool panels" },
 			},

@@ -5,12 +5,39 @@ return {
 			-- Only servers needing custom config are declared here.
 			-- All others are enabled automatically by mason-lspconfig.
 
+			-- Advertise blink.cmp's completion capabilities (snippets, resolveSupport
+			-- for additionalTextEdits/documentation/detail, etc.) to every LSP server.
+			-- Neovim merges this into each server's own vim.lsp.config() below.
+			vim.lsp.config("*", {
+				capabilities = require("blink.cmp").get_lsp_capabilities(),
+			})
+
 			-- jdtls requires a per-project workspace data directory
 			vim.lsp.config("jdtls", {
 				cmd = {
 					"jdtls",
 					"-data",
 					vim.fn.stdpath("data") .. "/jdtls-workspace/" .. vim.fn.fnamemodify(vim.fn.getcwd(), ":t"),
+				},
+				init_options = {
+					-- Tells jdtls it can rely on the client (blink) to resolve
+					-- additionalTextEdits, which is what actually inserts the import line.
+					extendedClientCapabilities = {
+						resolveAdditionalTextEditsSupport = true,
+					},
+				},
+				-- jdtls's InsertReplaceEdit "replace" range/text for import completions is
+				-- buggy (eclipse-jdtls/eclipse.jdt.ls#353, #591), producing stray "*;" and
+				-- leftover text when blink's keyword.range = "full" picks the replace range.
+				-- Disabling this makes jdtls fall back to a plain, insert-only TextEdit.
+				capabilities = {
+					textDocument = {
+						completion = {
+							completionItem = {
+								insertReplaceSupport = false,
+							},
+						},
+					},
 				},
 				-- Disable jdtls's background builder so it never writes .class files
 				-- to target/classes, where it can race with and corrupt Maven's own
@@ -19,6 +46,13 @@ return {
 				settings = {
 					java = {
 						autobuild = { enabled = false },
+						sources = {
+							organizeImports = {
+								-- Keep explicit imports; don't collapse to wildcard `*` imports.
+								starThreshold = 9999,
+								staticStarThreshold = 9999,
+							},
+						},
 					},
 				},
 			})

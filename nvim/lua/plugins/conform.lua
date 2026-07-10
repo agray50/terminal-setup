@@ -16,6 +16,7 @@ return {
 				yaml = { "prettier" },
 				markdown = { "prettier" },
 				lua = { "stylua" },
+				java = { "spotless_gradle", "spotless_maven", "google-java-format", stop_after_first = true },
 				python = { "isort", "black" },
 				go = { "goimports" },
 				rust = { "rustfmt" },
@@ -32,12 +33,12 @@ return {
 			},
 		})
 
-		vim.keymap.set({ "n", "v" }, "<leader>mp", function()
+		vim.keymap.set({ "n", "v" }, "<leader>lf", function()
 			conform.format({
 				lsp_format = "fallback",
 				async = false,
 				timeout_ms = 1000,
 			})
-		end, { desc = "Format file or range" })
+		end, { desc = "Trigger formatting for current file or range" })
 	end,
 }
