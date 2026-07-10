@@ -37,8 +37,23 @@ return {
 							if vim.bo[ctx.bufnr].filetype ~= "java" then
 								return items
 							end
+							-- jdtls only ever proposes the corrupt "*" on-demand-import
+							-- artifact (see eclipse-jdtls/eclipse.jdt.ls#353, #591) inside
+							-- import/package statements. Legitimate Module-kind completions
+							-- (package segments, module-info.java requires/exports) must
+							-- keep working everywhere else -- including other Module-kind
+							-- items in these same statements -- so gate on both the
+							-- statement context and the item's own text, not kind alone.
+							if not (ctx.line:match("^%s*import%s") or ctx.line:match("^%s*package%s")) then
+								return items
+							end
+							local Module = require("blink.cmp.types").CompletionItemKind.Module
 							return vim.tbl_filter(function(item)
-								return item.kind ~= require("blink.cmp.types").CompletionItemKind.Module
+								if item.kind ~= Module then
+									return true
+								end
+								local text = item.insertText or item.label or ""
+								return text ~= "*" and not text:match("%.%*$")
 							end, items)
 						end,
 					},
