@@ -68,6 +68,17 @@ return {
 				},
 			})
 
+			-- Tailwind v4 moves config into CSS (@theme, @apply, @plugin,
+			-- @custom-variant, @utility, @source); cssls doesn't recognise these
+			-- at-rules and flags them as errors, so silence that specific lint.
+			vim.lsp.config("cssls", {
+				settings = {
+					css = { lint = { unknownAtRules = "ignore" } },
+					scss = { lint = { unknownAtRules = "ignore" } },
+					less = { lint = { unknownAtRules = "ignore" } },
+				},
+			})
+
 			-- Use clippy instead of cargo check for richer diagnostics
 			vim.lsp.config("rust_analyzer", {
 				settings = {
