@@ -1,0 +1,136 @@
+# =============================================================================
+# Shared git configuration — installed as an [include] from ~/.gitconfig
+# =============================================================================
+# setup.sh adds:
+#   [include]
+#       path = ~/git/terminal-setup/git/gitconfig
+# to ~/.gitconfig, so edits here take effect immediately with no re-run, and
+# your identity/credentials stay in ~/.gitconfig (never in this repo).
+#
+# Anything you set directly in ~/.gitconfig AFTER the include wins, so local
+# overrides remain possible.
+# =============================================================================
+
+[core]
+    # delta renders diffs with syntax highlighting and proper word-level
+    # intra-line diffs. Installed by setup.sh and pinned in versions.lock.
+    pager = delta
+    editor = nvim
+
+[interactive]
+    diffFilter = delta --color-only
+
+[delta]
+    navigate = true          ; n / N jump between files in the pager
+    line-numbers = true
+    side-by-side = false     ; set true if you prefer split diffs in the terminal
+    syntax-theme = Catppuccin Mocha
+    hyperlinks = true
+
+[rerere]
+    # REuse REcorded REsolution. The single biggest rebase quality-of-life
+    # setting: git records how you resolved each conflict and replays that
+    # resolution automatically the next time the same conflict appears. When a
+    # rebase goes wrong and you abort and retry, you don't redo the work.
+    enabled = true
+    autoUpdate = true
+
+[rebase]
+    autosquash = true        ; `commit --fixup` commits reorder themselves
+    autostash = true         ; dirty tree no longer blocks a rebase
+    updateRefs = true        ; stacked branches follow along when you rebase
+    missingCommitsCheck = warn
+
+[merge]
+    # zdiff3 shows the common ancestor alongside both sides, so you can see
+    # what each side actually changed instead of guessing from two variants.
+    conflictstyle = zdiff3
+    # Keep fugitive's :Gvdiffsplit as the 3-way merge tool.
+    tool = nvimdiff
+    ff = false
+
+[mergetool]
+    prompt = false
+    keepBackup = false
+
+[mergetool "nvimdiff"]
+    cmd = nvim -d "$LOCAL" "$BASE" "$REMOTE" "$MERGED" -c 'wincmd w' -c 'wincmd J'
+
+[diff]
+    # histogram produces noticeably better hunks than the default myers,
+    # especially on reordered or reindented code.
+    algorithm = histogram
+    colorMoved = default     ; moved blocks shown in a distinct colour
+    colorMovedWS = allow-indentation-change
+    mnemonicPrefix = true    ; i/w/c/o prefixes instead of a/b
+    renames = copies
+
+[pull]
+    rebase = true            ; never create accidental merge commits
+
+[push]
+    default = current
+    autoSetupRemote = true   ; `git push` on a new branch just works
+    followTags = true
+
+[fetch]
+    prune = true             ; delete local refs for branches gone from remote
+    pruneTags = true
+    all = true
+
+[branch]
+    sort = -committerdate    ; most recently worked-on branches first
+
+[tag]
+    sort = -version:refname
+
+[column]
+    ui = auto                ; multi-column branch/tag/status output
+
+[status]
+    showUntrackedFiles = all
+    submoduleSummary = true
+
+[log]
+    date = iso
+
+[init]
+    defaultBranch = main
+
+[help]
+    autocorrect = prompt     ; "git stauts" offers to run status
+
+[commit]
+    verbose = true           ; full diff in the commit message buffer
+
+[blame]
+    coloring = highlightRecent
+    markIgnoredLines = true
+    markUnblamableLines = true
+
+# --- Aliases: the rebase/history toolkit ------------------------------------
+[alias]
+    # History
+    lg = log --graph --abbrev-commit --decorate --date=relative --format=format:'%C(bold blue)%h%C(reset) %C(bold green)(%ar)%C(reset) %C(white)%s%C(reset) %C(dim white)- %an%C(reset)%C(auto)%d%C(reset)' --all
+    last = log -1 HEAD --stat
+    # Rebase workflow
+    ri = rebase -i
+    rc = rebase --continue
+    ra = rebase --abort
+    rs = rebase --skip
+    # Interactive rebase onto the merge-base with the default branch — the
+    # "clean up my branch before review" command.
+    cleanup = "!f() { git rebase -i $(git merge-base HEAD ${1:-origin/main}); }; f"
+    fix = commit --fixup
+    squash = commit --squash
+    amend = commit --amend --no-edit
+    # Conflict inspection
+    conflicts = diff --name-only --diff-filter=U
+    ours = checkout --ours
+    theirs = checkout --theirs
+    # Safety
+    undo = reset --soft HEAD~1
+    pushf = push --force-with-lease
+    # Browsing
+    wip = "!git add -A && git commit -m 'wip'"
+    unstage = restore --staged

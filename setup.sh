@@ -5,6 +5,19 @@
 # Supports: macOS, Ubuntu/Debian, Fedora/RHEL, Arch, and generic Linux
 # Uses binary releases where possible — minimal package manager dependency
 # Idempotent: safe to run multiple times
+#
+# STABILITY MODEL
+# ---------------
+# Every version this script installs is pinned in `versions.lock`. A normal run
+# reads only that file and makes ZERO version-resolution network calls, so the
+# result is deterministic and reproducible — the same commit of this repo always
+# produces the same environment.
+#
+#   ./setup.sh            install/repair to match versions.lock
+#   ./setup.sh --update   re-resolve latest upstream versions, rewrite
+#                         versions.lock, install NOTHING (review the diff first)
+#   ./setup.sh --check    report drift between versions.lock and what's on disk
+#   ./setup.sh --dry-run  show what would change, change nothing
 # =============================================================================
 
 set -euo pipefail
@@ -12,17 +25,36 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_BIN="${HOME}/.local/bin"
 BACKUP_DIR="${HOME}/.config-backups/$(date +%Y%m%d-%H%M%S)"
+LOCKFILE="${SCRIPT_DIR}/versions.lock"
 MANUAL_STEPS=()
 
-NVIM_MINOR="v0.12."  # Pinned minor series — bump manually when ready to move to 0.13+
-
 DRY_RUN=false
+MODE="install"   # install | update | check
+
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=true ;;
+        --update)  MODE="update" ;;
+        --check)   MODE="check" ;;
         --help|-h)
-            echo "Usage: $0 [--dry-run]"
-            echo "  --dry-run   Show what would be installed/changed without changing anything"
+            cat <<'USAGE'
+Usage: ./setup.sh [OPTION]
+
+  (no option)   Install/repair the environment to match versions.lock.
+                Deterministic: no version resolution, no network version checks.
+
+  --update      Re-resolve the latest upstream version of every pinned tool,
+                rewrite versions.lock, and install nothing. Review with
+                `git diff versions.lock`, then run ./setup.sh to apply.
+
+  --check       Report drift between versions.lock and what is installed.
+
+  --dry-run     Show what would be installed/changed without changing anything.
+
+  --help, -h    Show this message.
+
+Roll back an update with:  git checkout versions.lock && ./setup.sh
+USAGE
             exit 0
             ;;
     esac
@@ -40,6 +72,47 @@ success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error()   { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 manual()  { echo -e "${CYAN}[MANUAL]${NC} $1"; MANUAL_STEPS+=("$1"); }
+
+# -----------------------------------------------------------------------------
+# Version lock
+# -----------------------------------------------------------------------------
+# versions.lock is a flat KEY=value file. Parsed rather than sourced so a stray
+# line in the lock file can never execute arbitrary code.
+
+# NOTE: deliberately no associative arrays here. macOS still ships bash 3.2 as
+# /bin/bash, and this script has to bootstrap on a fresh machine *before*
+# install_bash has upgraded it — so nothing in this file may use bash 4+ syntax.
+# Pins are therefore read straight from the lockfile on demand; it has ~25
+# entries, so the cost is irrelevant.
+
+load_lockfile() {
+    if [[ ! -f "$LOCKFILE" ]]; then
+        error "versions.lock not found at $LOCKFILE"
+        echo "  This file pins every tool version. Restore it with: git checkout versions.lock"
+        exit 1
+    fi
+    local count
+    count=$(grep -cE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "$LOCKFILE" || true)
+    if [[ "${count:-0}" -eq 0 ]]; then
+        error "versions.lock contains no KEY=value entries — it may be corrupt"
+        exit 1
+    fi
+    info "Loaded ${count} pinned versions from versions.lock"
+}
+
+# Read a pin, failing loudly rather than silently installing something unpinned.
+# Matches the first `KEY=value` line, ignoring comments and surrounding space.
+pin() {
+    local key="$1" value
+    value=$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\\([^#]*\\).*/\\1/p" "$LOCKFILE" \
+        | head -1 \
+        | sed 's/[[:space:]]*$//')
+    if [[ -z "$value" ]]; then
+        error "versions.lock is missing required key: $key"
+        exit 1
+    fi
+    printf '%s\n' "$value"
+}
 
 # -----------------------------------------------------------------------------
 # System Detection
@@ -118,9 +191,21 @@ add_line() {
     fi
 }
 
-# Append block to file only if marker line is not already present
+# Append a block to a file only if its marker line is not already present.
+# Content comes from STDIN, not an argument:
+#
+#     add_block "# marker" ~/.zshrc <<'EOF'
+#     ...
+#     EOF
+#
+# This deliberately avoids the `"$(cat <<'EOF' ... EOF)"` form used previously.
+# bash 3.2 — still /bin/bash on macOS, and what this script bootstraps under —
+# misparses a heredoc nested inside command substitution: while scanning for the
+# closing `)` it keeps applying quote and paren rules to the heredoc body, so any
+# `$(`, unbalanced quote or bare paren inside the block breaks the whole script.
 add_block() {
-    local marker="$1" content="$2" file="$3"
+    local marker="$1" file="$2" content
+    content=$(cat)
     if grep -qF "$marker" "$file" 2>/dev/null; then
         return 0
     elif $DRY_RUN; then
@@ -141,45 +226,48 @@ backup_if_exists() {
     info "Backed up $1"
 }
 
-# Resolve latest release tag from a GitHub repo (e.g. "v1.2.3" or "14.1.1")
+# Resolve latest release tag from a GitHub repo (e.g. "v1.2.3" or "14.1.1").
+# ONLY called by --update. The install path never resolves versions.
 github_latest_tag() {
     curl -fsLI "https://github.com/$1/releases/latest" -o /dev/null -w '%{url_effective}' 2>/dev/null \
         | sed 's|.*/tag/||'
 }
 
-# Resolve latest stable tag matching a given prefix (e.g. "v0.12.") from GitHub releases API.
-# Releases are returned newest-first; returns the first non-prerelease whose tag_name starts with prefix.
-github_latest_tag_prefix() {
-    local repo="$1" prefix="$2"
-    curl -fsL "https://api.github.com/repos/${repo}/releases" 2>/dev/null \
-        | python3 -c "
-import sys, json
-try:
-    for r in json.load(sys.stdin):
-        if r['tag_name'].startswith('${prefix}') and not r['prerelease']:
-            print(r['tag_name'])
-            break
-except Exception:
-    pass
-"
+# Latest tag (not release) — for repos that tag but never publish releases.
+github_latest_tag_only() {
+    curl -fsL "https://api.github.com/repos/$1/tags?per_page=1" 2>/dev/null \
+        | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
 }
 
-# Returns 0 (skip) if the binary is already at latest_tag, 1 (needs install/update).
-# Prints status in both cases.
-# Usage: version_up_to_date "name" "latest_tag" "$(binary --version 2>/dev/null | head -1)"
-version_up_to_date() {
-    local name="$1" latest_tag="$2" installed="$3"
-    local latest_ver="${latest_tag#v}"  # strip leading 'v' for string matching
+# Latest commit SHA on the default branch — for repos with no tags at all.
+github_latest_commit() {
+    curl -fsL "https://api.github.com/repos/$1/commits?per_page=1" 2>/dev/null \
+        | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+}
+
+# Latest mason-registry snapshot tag.
+mason_latest_registry() {
+    curl -fsL "https://api.github.com/repos/mason-org/mason-registry/releases?per_page=1" 2>/dev/null \
+        | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+}
+
+# Compare a pinned tag against an installed version string.
+# Returns 0 (skip — already correct) or 1 (install/update needed).
+# Usage: at_pinned_version "name" "$pinned_tag" "$(binary --version | head -1)"
+at_pinned_version() {
+    local name="$1" pinned_tag="$2" installed="$3"
+    local pinned_ver="${pinned_tag#v}"   # strip leading 'v'
+    pinned_ver="${pinned_ver#jq-}"       # jq tags look like 'jq-1.8.2'
     if [[ -z "$installed" ]]; then
-        info "Installing ${name} ${latest_tag}..."
+        info "Installing ${name} ${pinned_tag}..."
         return 1
     fi
-    if echo "$installed" | grep -qF "$latest_ver"; then
-        success "${name} ${latest_tag} — up to date"
+    if echo "$installed" | grep -qF "$pinned_ver"; then
+        success "${name} ${pinned_tag} — pinned, up to date"
         return 0
     fi
     local cur; cur=$(echo "$installed" | grep -oE '[0-9][0-9.]*[0-9]' | head -1)
-    info "Updating ${name}: ${cur} → ${latest_ver}"
+    info "Changing ${name}: ${cur:-unknown} → ${pinned_ver} (pinned)"
     return 1
 }
 
@@ -194,6 +282,51 @@ sed_inplace() {
         sed -i '' "$expr" "$file"
     else
         sed -i "$expr" "$file"
+    fi
+}
+
+# Clone (or move an existing clone) to an exact tag/commit, detached.
+# Replaces the old `git pull` pattern, which tracked moving branches and was
+# the main reason a working setup would break without anything changing locally.
+clone_at_tag() {
+    local url="$1" dir="$2" ref="$3"
+    local name="${4:-$(basename "$dir")}"
+
+    if [[ -d "$dir/.git" ]]; then
+        local current
+        current=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo "")
+        # Already exactly at the requested ref?
+        if [[ "$current" == "$ref"* ]]; then
+            success "${name} @ ${ref:0:12} — pinned, up to date"
+            return 0
+        fi
+        local resolved
+        resolved=$(git -C "$dir" rev-parse "refs/tags/${ref}^{commit}" 2>/dev/null || echo "")
+        if [[ -n "$resolved" && "$current" == "$resolved" ]]; then
+            success "${name} @ ${ref} — pinned, up to date"
+            return 0
+        fi
+    fi
+
+    if $DRY_RUN; then
+        info "[dry-run] would check out ${name} at ${ref} in $dir"
+        return 0
+    fi
+
+    if [[ ! -d "$dir/.git" ]]; then
+        rm -rf "$dir"
+        git clone --quiet --filter=blob:none "$url" "$dir"
+    fi
+
+    git -C "$dir" fetch --quiet --tags --force origin || true
+    # A 40-char hex string is a commit SHA; anything else is a tag.
+    if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+        git -C "$dir" fetch --quiet origin "$ref" 2>/dev/null || true
+    fi
+    if git -C "$dir" checkout --quiet --detach "$ref" 2>/dev/null; then
+        success "${name} @ ${ref} — checked out"
+    else
+        warn "${name}: could not check out ref '${ref}' — leaving as-is"
     fi
 }
 
@@ -235,7 +368,8 @@ install_from_tarball() {
     tar -xzf "$tmpdir/archive.tar.gz" -C "$tmpdir"
 
     local bin_path
-    bin_path=$(find "$tmpdir" -name "$binary" -type f | head -1)
+    bin_path=$(find "$tmpdir" -name "$binary" -type f -perm -u+x | head -1)
+    [[ -z "$bin_path" ]] && bin_path=$(find "$tmpdir" -name "$binary" -type f | head -1)
 
     if [[ -z "$bin_path" ]]; then
         rm -rf "$tmpdir"
@@ -294,31 +428,34 @@ install_zsh() {
 
 install_ohmyzsh() {
     info "=== oh-my-zsh ==="
-    if [[ -d "${HOME}/.oh-my-zsh" ]]; then
-        success "oh-my-zsh already installed"
-        return 0
+    local dir="${HOME}/.oh-my-zsh"
+    if [[ ! -d "$dir" ]]; then
+        if $DRY_RUN; then
+            info "[dry-run] would install oh-my-zsh"
+            return 0
+        fi
+        RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+        success "oh-my-zsh installed"
     fi
-    if $DRY_RUN; then
-        info "[dry-run] would install oh-my-zsh"
-        return 0
-    fi
-    RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-    success "oh-my-zsh installed"
+    # oh-my-zsh publishes no tags, so the installer always lands on master HEAD.
+    # Move it to the pinned commit so it stops being a moving target.
+    clone_at_tag "https://github.com/ohmyzsh/ohmyzsh.git" "$dir" "$(pin OHMYZSH_COMMIT)" "oh-my-zsh"
 }
 
 install_powerlevel10k() {
     info "=== powerlevel10k ==="
     local dir="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
-    if [[ ! -d "$dir" ]]; then
-        run git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$dir"
-        success "powerlevel10k installed"
-    else
-        run git -C "$dir" pull --ff-only --quiet && success "powerlevel10k updated"
-    fi
+    clone_at_tag "https://github.com/romkatv/powerlevel10k.git" "$dir" "$(pin P10K_VERSION)" "powerlevel10k"
 
     if [[ -f "${HOME}/.zshrc" ]] && ! grep -q '^ZSH_THEME="powerlevel10k/powerlevel10k"' "${HOME}/.zshrc"; then
         sed_inplace 's|^ZSH_THEME="[^"]*"|ZSH_THEME="powerlevel10k/powerlevel10k"|' "${HOME}/.zshrc"
     fi
+
+    # p10k's instant prompt must be the FIRST thing in .zshrc to work. Without
+    # it the prompt waits for the whole rc file to finish. Previously this block
+    # only existed if you'd run `p10k configure` by hand, so a fresh machine
+    # silently lost the fast prompt.
+    setup_p10k_instant_prompt
 
     if [[ -f "${SCRIPT_DIR}/p10k.zsh" ]]; then
         run cp "${SCRIPT_DIR}/p10k.zsh" "${HOME}/.p10k.zsh"
@@ -330,60 +467,71 @@ install_powerlevel10k() {
     add_line '[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh' "${HOME}/.zshrc"
 }
 
+setup_p10k_instant_prompt() {
+    local zshrc="${HOME}/.zshrc"
+    [[ -f "$zshrc" ]] || touch "$zshrc"
+    if grep -qF 'p10k-instant-prompt' "$zshrc" 2>/dev/null; then
+        return 0
+    fi
+    if $DRY_RUN; then
+        info "[dry-run] would prepend p10k instant-prompt block to $zshrc"
+        return 0
+    fi
+    local tmp
+    tmp=$(mktemp)
+    cat > "$tmp" <<'IP_EOF'
+# Enable Powerlevel10k instant prompt. Should stay close to the top of ~/.zshrc.
+# Initialization code that may require console input (password prompts, [y/n]
+# confirmations, etc.) must go above this block; everything else may go below.
+if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
+  source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
+fi
+
+IP_EOF
+    cat "$zshrc" >> "$tmp"
+    mv "$tmp" "$zshrc"
+    success "p10k instant-prompt block prepended to .zshrc"
+}
+
 install_zsh_plugins() {
     info "=== zsh plugins ==="
     local custom="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins"
 
-    if [[ ! -d "$custom/zsh-syntax-highlighting" ]]; then
-        run git clone https://github.com/zsh-users/zsh-syntax-highlighting.git "$custom/zsh-syntax-highlighting"
-        success "zsh-syntax-highlighting installed"
-    else
-        run git -C "$custom/zsh-syntax-highlighting" pull --ff-only --quiet && success "zsh-syntax-highlighting updated"
-    fi
-
-    if [[ ! -d "$custom/zsh-autosuggestions" ]]; then
-        run git clone https://github.com/zsh-users/zsh-autosuggestions "$custom/zsh-autosuggestions"
-        success "zsh-autosuggestions installed"
-    else
-        run git -C "$custom/zsh-autosuggestions" pull --ff-only --quiet && success "zsh-autosuggestions updated"
-    fi
+    clone_at_tag "https://github.com/zsh-users/zsh-syntax-highlighting.git" \
+        "$custom/zsh-syntax-highlighting" "$(pin ZSH_SYNTAX_HIGHLIGHTING_VERSION)" "zsh-syntax-highlighting"
+    clone_at_tag "https://github.com/zsh-users/zsh-autosuggestions.git" \
+        "$custom/zsh-autosuggestions" "$(pin ZSH_AUTOSUGGESTIONS_VERSION)" "zsh-autosuggestions"
 
     if [[ -f "${HOME}/.zshrc" ]]; then
-        if grep -q "zsh-syntax-highlighting" "${HOME}/.zshrc"; then
-            :
-        elif $DRY_RUN; then
-            info "[dry-run] would add zsh-syntax-highlighting to .zshrc plugins list"
-        else
-            perl -i -pe 's/^(plugins=\()(.+)(\))/$1$2 zsh-syntax-highlighting$3/' "${HOME}/.zshrc"
-        fi
-        if grep -q "zsh-autosuggestions" "${HOME}/.zshrc"; then
-            :
-        elif $DRY_RUN; then
-            info "[dry-run] would add zsh-autosuggestions to .zshrc plugins list"
-        else
-            perl -i -pe 's/^(plugins=\()(.+)(\))/$1$2 zsh-autosuggestions$3/' "${HOME}/.zshrc"
-        fi
+        local plugin
+        for plugin in zsh-syntax-highlighting zsh-autosuggestions; do
+            if grep -q "$plugin" "${HOME}/.zshrc"; then
+                continue
+            elif $DRY_RUN; then
+                info "[dry-run] would add $plugin to .zshrc plugins list"
+            else
+                perl -i -pe "s/^(plugins=\()(.+)(\))/\$1\$2 $plugin\$3/" "${HOME}/.zshrc"
+            fi
+        done
     fi
 }
 
 # -----------------------------------------------------------------------------
-# CLI Tools — binary releases
+# CLI Tools — binary releases, all versions from versions.lock
 # -----------------------------------------------------------------------------
 
 install_bash() {
     info "=== bash ==="
     # macOS ships with bash 3.2 (GPL licensing); upgrade to bash 5 via brew
     if [[ "$(detect_os)" != "macos" ]]; then success "bash — skipped (Linux)"; return 0; fi
-    local current_version
+    local current_version major
     current_version=$(bash --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
-    local major="${current_version%%.*}"
+    major="${current_version%%.*}"
     if [[ "$major" -ge 5 ]]; then
         success "bash already at version $current_version"
         return 0
     fi
-    if brew list bash &>/dev/null; then
-        :
-    else
+    if ! brew list bash &>/dev/null; then
         run brew install bash
     fi
     success "bash upgraded"
@@ -391,20 +539,15 @@ install_bash() {
 
 install_fzf() {
     info "=== fzf ==="
-    local tag needs_binary=true
-    tag=$(github_latest_tag "junegunn/fzf")
+    local tag; tag=$(pin FZF_VERSION)
 
-    if [[ ! -d "${HOME}/.fzf" ]]; then
-        run git clone --depth 1 https://github.com/junegunn/fzf.git "${HOME}/.fzf"
-    else
-        run git -C "${HOME}/.fzf" pull --ff-only --quiet
-        # Skip binary download if already at latest
-        version_up_to_date "fzf" "$tag" "$("$LOCAL_BIN/fzf" --version 2>/dev/null | head -1)" && needs_binary=false
-    fi
+    # fzf is cloned (not just downloaded) because its repo ships the completion
+    # and key-binding shell scripts; the binary comes from its own installer.
+    clone_at_tag "https://github.com/junegunn/fzf.git" "${HOME}/.fzf" "$tag" "fzf"
 
-    if $needs_binary; then
+    if ! at_pinned_version "fzf" "$tag" "$("$LOCAL_BIN/fzf" --version 2>/dev/null | head -1)"; then
         run "${HOME}/.fzf/install" --bin
-        success "fzf ${tag} installed"
+        success "fzf ${tag} binary installed"
     fi
 
     if $DRY_RUN; then
@@ -430,14 +573,9 @@ install_neovim() {
     local os arch tag url
     os=$(detect_os)
     arch=$(detect_arch)
-    tag=$(github_latest_tag_prefix "neovim/neovim" "$NVIM_MINOR")
+    tag=$(pin NVIM_VERSION)
 
-    if [[ -z "$tag" ]]; then
-        warn "Could not resolve latest neovim ${NVIM_MINOR}x tag (API rate limit or network issue) — skipping"
-        return 0
-    fi
-
-    version_up_to_date "neovim" "$tag" "$(nvim --version 2>/dev/null | head -1)" && return 0
+    at_pinned_version "neovim" "$tag" "$(nvim --version 2>/dev/null | head -1)" && return 0
 
     if [[ "$os" == "macos" ]]; then
         url="https://github.com/neovim/neovim/releases/download/${tag}/nvim-macos-${arch}.tar.gz"
@@ -468,8 +606,8 @@ install_neovim() {
 install_ripgrep() {
     info "=== ripgrep ==="
     local tag version target
-    tag=$(github_latest_tag "BurntSushi/ripgrep")
-    version_up_to_date "rg" "$tag" "$("$LOCAL_BIN/rg" --version 2>/dev/null | head -1)" && return 0
+    tag=$(pin RIPGREP_VERSION)
+    at_pinned_version "rg" "$tag" "$("$LOCAL_BIN/rg" --version 2>/dev/null | head -1)" && return 0
     version="${tag#v}"
     target=$(detect_rust_target)
     install_from_tarball \
@@ -481,8 +619,8 @@ install_ripgrep() {
 install_fd() {
     info "=== fd ==="
     local tag target
-    tag=$(github_latest_tag "sharkdp/fd")
-    version_up_to_date "fd" "$tag" "$("$LOCAL_BIN/fd" --version 2>/dev/null | head -1)" && return 0
+    tag=$(pin FD_VERSION)
+    at_pinned_version "fd" "$tag" "$("$LOCAL_BIN/fd" --version 2>/dev/null | head -1)" && return 0
     target=$(detect_rust_target)
     install_from_tarball \
         "https://github.com/sharkdp/fd/releases/download/${tag}/fd-${tag}-${target}.tar.gz" \
@@ -493,8 +631,8 @@ install_fd() {
 install_bat() {
     info "=== bat ==="
     local tag target
-    tag=$(github_latest_tag "sharkdp/bat")
-    version_up_to_date "bat" "$tag" "$("$LOCAL_BIN/bat" --version 2>/dev/null | head -1)" && return 0
+    tag=$(pin BAT_VERSION)
+    at_pinned_version "bat" "$tag" "$("$LOCAL_BIN/bat" --version 2>/dev/null | head -1)" && return 0
     target=$(detect_rust_target)
     install_from_tarball \
         "https://github.com/sharkdp/bat/releases/download/${tag}/bat-${tag}-${target}.tar.gz" \
@@ -506,19 +644,26 @@ install_eza() {
     info "=== eza ==="
     local os arch tag url
     os=$(detect_os)
-    tag=$(github_latest_tag "eza-community/eza")
-    version_up_to_date "eza" "$tag" "$("$LOCAL_BIN/eza" --version 2>/dev/null | head -1)" && return 0
+    tag=$(pin EZA_VERSION)
 
     if [[ "$os" == "macos" ]]; then
-        # No macOS binaries in eza releases — brew is the only option
-        if $DRY_RUN; then
-            info "[dry-run] would run: brew upgrade/install eza"
-        else
-            brew upgrade eza 2>/dev/null || brew install eza
+        # eza publishes no macOS binaries, so brew is the only option. brew
+        # tracks its own formula version, which may differ from the pinned tag —
+        # report what brew actually has rather than echoing the pin back.
+        if command_exists eza && brew list eza &>/dev/null; then
+            success "eza $(eza --version 2>/dev/null | grep -oE 'v[0-9.]+' | head -1) — via brew (pin ${tag} is advisory on macOS)"
+            return 0
         fi
-        success "eza ${tag} installed"
+        if $DRY_RUN; then
+            info "[dry-run] would run: brew install eza"
+        else
+            brew install eza
+        fi
+        success "eza installed via brew"
         return 0
     fi
+
+    at_pinned_version "eza" "$tag" "$("$LOCAL_BIN/eza" --version 2>/dev/null | head -2 | tail -1)" && return 0
 
     # Linux: x86_64 has a musl build; aarch64 only has gnu
     arch=$(detect_arch_rust)
@@ -536,8 +681,8 @@ install_jq() {
     local os arch tag jq_os jq_arch
     os=$(detect_os)
     arch=$(detect_arch)
-    tag=$(github_latest_tag "jqlang/jq")
-    version_up_to_date "jq" "$tag" "$("$LOCAL_BIN/jq" --version 2>/dev/null)" && return 0
+    tag=$(pin JQ_VERSION)
+    at_pinned_version "jq" "$tag" "$("$LOCAL_BIN/jq" --version 2>/dev/null)" && return 0
     [[ "$os" == "macos" ]] && jq_os="macos" || jq_os="linux"
     [[ "$arch" == "x86_64" ]] && jq_arch="amd64" || jq_arch="arm64"
     install_from_binary_url \
@@ -551,8 +696,8 @@ install_yq() {
     local os arch tag yq_os yq_arch
     os=$(detect_os)
     arch=$(detect_arch)
-    tag=$(github_latest_tag "mikefarah/yq")
-    version_up_to_date "yq" "$tag" "$("$LOCAL_BIN/yq" --version 2>/dev/null | head -1)" && return 0
+    tag=$(pin YQ_VERSION)
+    at_pinned_version "yq" "$tag" "$("$LOCAL_BIN/yq" --version 2>/dev/null | head -1)" && return 0
     [[ "$os" == "macos" ]] && yq_os="darwin" || yq_os="linux"
     [[ "$arch" == "x86_64" ]] && yq_arch="amd64" || yq_arch="arm64"
     install_from_binary_url \
@@ -566,14 +711,78 @@ install_k9s() {
     local os arch tag k9s_os k9s_arch
     os=$(detect_os)
     arch=$(detect_arch)
-    tag=$(github_latest_tag "derailed/k9s")
-    version_up_to_date "k9s" "$tag" "$("$LOCAL_BIN/k9s" version 2>/dev/null | grep -i 'Version:' | head -1)" && return 0
+    tag=$(pin K9S_VERSION)
+    at_pinned_version "k9s" "$tag" "$("$LOCAL_BIN/k9s" version 2>/dev/null | grep -i 'Version:' | head -1)" && return 0
     [[ "$os" == "macos" ]] && k9s_os="Darwin" || k9s_os="Linux"
     [[ "$arch" == "x86_64" ]] && k9s_arch="amd64" || k9s_arch="arm64"
     install_from_tarball \
         "https://github.com/derailed/k9s/releases/download/${tag}/k9s_${k9s_os}_${k9s_arch}.tar.gz" \
         "k9s"
     success "k9s ${tag} installed"
+}
+
+install_lazygit() {
+    info "=== lazygit ==="
+    # Primary git UI (nvim: <leader>gg). Handles interactive rebase, conflict
+    # resolution, stashes, cherry-pick and amend far better than any nvim plugin.
+    local os arch tag lg_os lg_arch
+    os=$(detect_os)
+    arch=$(detect_arch)
+    tag=$(pin LAZYGIT_VERSION)
+    at_pinned_version "lazygit" "$tag" "$("$LOCAL_BIN/lazygit" --version 2>/dev/null | head -1)" && return 0
+    [[ "$os" == "macos" ]] && lg_os="Darwin" || lg_os="Linux"
+    [[ "$arch" == "x86_64" ]] && lg_arch="x86_64" || lg_arch="arm64"
+    install_from_tarball \
+        "https://github.com/jesseduffield/lazygit/releases/download/${tag}/lazygit_${tag#v}_${lg_os}_${lg_arch}.tar.gz" \
+        "lazygit"
+    success "lazygit ${tag} installed"
+}
+
+install_delta() {
+    info "=== delta ==="
+    # Syntax-highlighted git diffs in the terminal; configured as git's pager
+    # in git/gitconfig and reused by fzf-lua's git previewers.
+    local tag target
+    tag=$(pin DELTA_VERSION)
+    at_pinned_version "delta" "$tag" "$("$LOCAL_BIN/delta" --version 2>/dev/null | head -1)" && return 0
+    target=$(detect_rust_target)
+    install_from_tarball \
+        "https://github.com/dandavison/delta/releases/download/${tag}/delta-${tag}-${target}.tar.gz" \
+        "delta"
+    success "delta ${tag} installed"
+}
+
+install_postgres_client() {
+    info "=== postgres client (psql) ==="
+    # Required by vim-dadbod for the <leader>D database UI. Client only — this
+    # does not install or run a Postgres server.
+    if command_exists psql; then
+        success "psql already installed ($(psql --version 2>/dev/null))"
+        return 0
+    fi
+    case "$(detect_os)" in
+        macos)
+            # libpq is keg-only: it ships psql but is not symlinked into PATH.
+            if $DRY_RUN; then
+                info "[dry-run] would run: brew install libpq and symlink psql"
+            else
+                brew install libpq
+                mkdir -p "$LOCAL_BIN"
+                local pq; pq="$(brew --prefix libpq 2>/dev/null)"
+                if [[ -x "$pq/bin/psql" ]]; then
+                    ln -sf "$pq/bin/psql" "$LOCAL_BIN/psql"
+                    ln -sf "$pq/bin/pg_dump" "$LOCAL_BIN/pg_dump" 2>/dev/null || true
+                    success "psql installed (libpq, symlinked into ~/.local/bin)"
+                else
+                    warn "libpq installed but psql not found at $pq/bin/psql"
+                fi
+            fi
+            ;;
+        debian) pkg_install "postgresql-client" ;;
+        fedora) pkg_install "postgresql" ;;
+        arch)   pkg_install "postgresql-libs" ;;
+        *)      manual "Install a postgres client (psql) for the nvim database UI" ;;
+    esac
 }
 
 # -----------------------------------------------------------------------------
@@ -591,13 +800,8 @@ install_tmux() {
 
 install_tpm() {
     info "=== tpm ==="
-    local dir="${HOME}/.tmux/plugins/tpm"
-    if [[ ! -d "$dir" ]]; then
-        run git clone https://github.com/tmux-plugins/tpm "$dir"
-        success "tpm installed"
-    else
-        run git -C "$dir" pull --ff-only --quiet && success "tpm updated"
-    fi
+    clone_at_tag "https://github.com/tmux-plugins/tpm.git" \
+        "${HOME}/.tmux/plugins/tpm" "$(pin TPM_VERSION)" "tpm"
 }
 
 # -----------------------------------------------------------------------------
@@ -606,6 +810,8 @@ install_tpm() {
 
 install_rust() {
     info "=== Rust ==="
+    # rustup itself is the pinning mechanism for Rust (rust-toolchain.toml per
+    # project), so the toolchain is not pinned here — only tree-sitter-cli below.
     if [[ -f "${HOME}/.cargo/bin/cargo" ]]; then
         success "Rust already installed"
     elif $DRY_RUN; then
@@ -620,17 +826,28 @@ install_rust() {
 
 install_tree_sitter_cli() {
     info "=== tree-sitter-cli ==="
-    local cargo="${HOME}/.cargo/bin/cargo"
+    local cargo="${HOME}/.cargo/bin/cargo" tag
+    tag=$(pin TREE_SITTER_CLI_VERSION)
+    # Upstream tags releases as "v0.27.0" but `cargo install --version` wants a
+    # bare semver, so accept either form in versions.lock.
+    tag="${tag#v}"
+
     if [[ ! -f "$cargo" ]]; then
         warn "cargo not found — skipping tree-sitter-cli (Rust must be installed first)"
         return 0
     fi
 
-    if "$cargo" install --list 2>/dev/null | grep -q '^tree-sitter-cli '; then
-        success "tree-sitter-cli already installed"
+    # nvim-treesitter's `main` branch compiles parsers with this CLI, so its
+    # version affects whether parsers build. Pin it and use --locked so the
+    # crate's own dependency lockfile is respected.
+    local installed
+    installed=$("$cargo" install --list 2>/dev/null | sed -n 's/^tree-sitter-cli v\([0-9.]*\).*/\1/p' | head -1)
+    if [[ "$installed" == "$tag" ]]; then
+        success "tree-sitter-cli ${tag} — pinned, up to date"
     else
-        run "$cargo" install tree-sitter-cli
-        success "tree-sitter-cli installed"
+        info "Installing tree-sitter-cli ${tag} (was: ${installed:-none}) — this compiles from source and takes a few minutes"
+        run "$cargo" install tree-sitter-cli --version "$tag" --locked --force
+        success "tree-sitter-cli ${tag} installed"
     fi
 
     # Symlink into LOCAL_BIN so it's available before cargo env is sourced in new shells
@@ -644,22 +861,21 @@ install_tree_sitter_cli() {
 
 install_nvm() {
     info "=== nvm ==="
+    local tag; tag=$(pin NVM_VERSION)
     if [[ -d "${HOME}/.nvm" ]]; then
-        success "nvm already installed"
+        success "nvm already installed (pinned ${tag})"
     elif $DRY_RUN; then
-        info "[dry-run] would install nvm"
+        info "[dry-run] would install nvm ${tag}"
     else
-        local tag
-        tag=$(github_latest_tag "nvm-sh/nvm")
         curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/${tag}/install.sh" | bash
-        success "nvm installed"
+        success "nvm ${tag} installed"
     fi
 
     # nvm's installer may have already written its init block to .zshrc (when $SHELL=zsh);
     # check for the sourced script rather than our marker to avoid duplicates.
     # Sourcing nvm.sh is real shell-startup cost, so defer it behind a lazy-loading
     # stub that only runs on first actual use of nvm/node/npm/npx.
-    grep -qF 'nvm.sh' "${HOME}/.zshrc" 2>/dev/null || add_block "# nvm" "$(cat <<'EOF'
+    grep -qF 'nvm.sh' "${HOME}/.zshrc" 2>/dev/null || add_block "# nvm" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # nvm (lazy-loaded on first use)
 export NVM_DIR="$HOME/.nvm"
 _nvm_lazy_load() {
@@ -671,24 +887,18 @@ nvm()  { _nvm_lazy_load; nvm "$@"; }
 node() { _nvm_lazy_load; node "$@"; }
 npm()  { _nvm_lazy_load; npm "$@"; }
 npx()  { _nvm_lazy_load; npx "$@"; }
-EOF
-)" "${HOME}/.zshrc"
+BLOCK_EOF
 }
 
 install_pyenv() {
     info "=== pyenv ==="
-    if [[ -d "${HOME}/.pyenv" ]]; then
-        success "pyenv already installed"
-    elif $DRY_RUN; then
-        info "[dry-run] would install pyenv"
-    else
-        curl https://pyenv.run | bash
-        success "pyenv installed"
-    fi
+    # Cloned at a pinned tag rather than installed via `curl pyenv.run | bash`,
+    # which always fetches master and is one of the ways this setup used to drift.
+    clone_at_tag "https://github.com/pyenv/pyenv.git" "${HOME}/.pyenv" "$(pin PYENV_VERSION)" "pyenv"
 
     # `pyenv init -` forks pyenv and evals its output on every shell startup;
     # defer that behind a lazy-loading stub that runs on first actual use.
-    add_block "# pyenv" "$(cat <<'EOF'
+    add_block "# pyenv" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # pyenv (lazy-loaded on first use)
 export PYENV_ROOT="$HOME/.pyenv"
 [[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
@@ -701,8 +911,7 @@ python()  { _pyenv_lazy_load; python "$@"; }
 python3() { _pyenv_lazy_load; python3 "$@"; }
 pip()     { _pyenv_lazy_load; pip "$@"; }
 pip3()    { _pyenv_lazy_load; pip3 "$@"; }
-EOF
-)" "${HOME}/.zshrc"
+BLOCK_EOF
 
     # pyenv builds Python from source — surface the required packages per distro
     case "$(detect_os)" in
@@ -717,16 +926,11 @@ EOF
 
 install_goenv() {
     info "=== goenv ==="
-    if [[ ! -d "${HOME}/.goenv" ]]; then
-        run git clone --depth=1 https://github.com/go-nv/goenv.git "${HOME}/.goenv"
-        success "goenv installed"
-    else
-        run git -C "${HOME}/.goenv" pull --ff-only --quiet && success "goenv updated"
-    fi
+    clone_at_tag "https://github.com/go-nv/goenv.git" "${HOME}/.goenv" "$(pin GOENV_VERSION)" "goenv"
 
     # `goenv init -` forks goenv and evals its output on every shell startup;
     # defer that behind a lazy-loading stub that runs on first actual use.
-    add_block "# goenv" "$(cat <<'EOF'
+    add_block "# goenv" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # goenv (lazy-loaded on first use)
 export GOENV_ROOT="$HOME/.goenv"
 export PATH="$GOENV_ROOT/bin:$PATH"
@@ -737,8 +941,7 @@ _goenv_lazy_load() {
 }
 goenv() { _goenv_lazy_load; goenv "$@"; }
 go()    { _goenv_lazy_load; go "$@"; }
-EOF
-)" "${HOME}/.zshrc"
+BLOCK_EOF
 
     # goenv downloads pre-built Go binaries but needs gcc/make for cgo-based tooling
     case "$(detect_os)" in
@@ -768,6 +971,20 @@ install_sdkman() {
         success "SDKMAN installed"
     fi
 
+    # SDKMAN self-updates on every shell start by default, which silently moves
+    # your JVM tooling. Turn that off so `sdk selfupdate` becomes deliberate —
+    # the same stability contract as versions.lock. Java versions themselves are
+    # pinned per-project by .sdkmanrc.
+    local sdk_cfg="${HOME}/.sdkman/etc/config"
+    if [[ -f "$sdk_cfg" ]]; then
+        if grep -q '^sdkman_auto_selfupdate=false' "$sdk_cfg"; then
+            success "SDKMAN auto-selfupdate already disabled"
+        else
+            sed_inplace 's/^sdkman_auto_selfupdate=.*/sdkman_auto_selfupdate=false/' "$sdk_cfg"
+            success "SDKMAN auto-selfupdate disabled (run 'sdk selfupdate' manually)"
+        fi
+    fi
+
     # SDKMAN's installer may have already written its init block to .zshrc;
     # check for the sourced script rather than our marker to avoid duplicates.
     # Deliberately NOT lazy-loaded like nvm/pyenv/goenv above: SDKMAN manages
@@ -775,12 +992,11 @@ install_sdkman() {
     # (./mvnw, ./gradlew) invoke those directly rather than through a shell
     # function, so they wouldn't trigger a lazy stub. Given heavy day-to-day
     # Java use, deferring this risks JAVA_HOME being unset in a fresh shell.
-    grep -qF 'sdkman-init.sh' "${HOME}/.zshrc" 2>/dev/null || add_block "# SDKMAN" "$(cat <<'EOF'
+    grep -qF 'sdkman-init.sh' "${HOME}/.zshrc" 2>/dev/null || add_block "# SDKMAN" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # SDKMAN
 export SDKMAN_DIR="$HOME/.sdkman"
 [[ -s "$HOME/.sdkman/bin/sdkman-init.sh" ]] && source "$HOME/.sdkman/bin/sdkman-init.sh"
-EOF
-)" "${HOME}/.zshrc"
+BLOCK_EOF
 }
 
 install_docker() {
@@ -844,12 +1060,7 @@ $(. /etc/os-release && echo "${VERSION_CODENAME}") stable" \
 
 install_tfenv() {
     info "=== tfenv ==="
-    if [[ ! -d "${HOME}/.tfenv" ]]; then
-        run git clone --depth=1 https://github.com/tfutils/tfenv.git "${HOME}/.tfenv"
-        success "tfenv installed"
-    else
-        run git -C "${HOME}/.tfenv" pull --ff-only --quiet && success "tfenv updated"
-    fi
+    clone_at_tag "https://github.com/tfutils/tfenv.git" "${HOME}/.tfenv" "$(pin TFENV_VERSION)" "tfenv"
 
     if $DRY_RUN; then
         info "[dry-run] would symlink tfenv binaries into $LOCAL_BIN"
@@ -857,11 +1068,12 @@ install_tfenv() {
     fi
 
     mkdir -p "$LOCAL_BIN"
+    local bin dest
     for bin in "${HOME}/.tfenv/bin/"*; do
-        local dest="$LOCAL_BIN/$(basename "$bin")"
-        [[ ! -e "$dest" ]] && ln -s "$bin" "$dest"
+        dest="$LOCAL_BIN/$(basename "$bin")"
+        [[ -e "$dest" ]] || ln -s "$bin" "$dest"
     done
-    success "tfenv installed"
+    success "tfenv binaries linked"
 }
 
 # -----------------------------------------------------------------------------
@@ -879,19 +1091,27 @@ setup_local_bin() {
         return 0
     fi
     mkdir -p "$LOCAL_BIN"
-    grep -vF "$line" "$zshrc" > "${zshrc}.tmp" 2>/dev/null && mv "${zshrc}.tmp" "$zshrc" || true
+    touch "$zshrc"
+    # grep exits 1 when it filters out every line or the file is empty, so the
+    # exit status is deliberately ignored — but the move must still happen.
+    grep -vF "$line" "$zshrc" > "${zshrc}.tmp" || true
+    mv "${zshrc}.tmp" "$zshrc"
     echo "$line" >> "$zshrc"
+    success "$LOCAL_BIN on PATH (last, so it takes precedence)"
 }
 
 setup_zsh_env() {
     info "=== zsh environment ==="
     add_line 'export EDITOR="nvim"' "${HOME}/.zshrc"
+    add_line 'export VISUAL="nvim"' "${HOME}/.zshrc"
+    # bat powers fzf/delta previews and `cat`; match the nvim colourscheme.
+    add_line 'export BAT_THEME="Catppuccin Mocha"' "${HOME}/.zshrc"
     success "zsh environment configured"
 }
 
 setup_zsh_keybindings() {
     info "=== zsh keybindings ==="
-    add_block "# Custom keybindings" "$(cat <<'EOF'
+    add_block "# Custom keybindings" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # Custom keybindings
 bindkey -e
 bindkey '^B' backward-kill-line
@@ -899,14 +1119,13 @@ bindkey '^F' kill-line
 bindkey '^P' forward-word
 bindkey '^O' backward-word
 bindkey '^Y' clear-screen
-EOF
-)" "${HOME}/.zshrc"
+BLOCK_EOF
     success "Keybindings configured"
 }
 
 setup_zsh_aliases() {
     info "=== zsh aliases ==="
-    add_block "# Custom aliases" "$(cat <<'EOF'
+    add_block "# Custom aliases" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # Custom aliases
 
 # eza — better ls
@@ -936,17 +1155,28 @@ alias tfp='terraform plan'
 alias tfa='terraform apply'
 alias tfd='terraform destroy'
 
+# git — lazygit is the primary UI (same tool nvim's <leader>gg opens)
+alias lg='lazygit'
+alias gs='git status'
+alias gd='git diff'
+alias gds='git diff --staged'
+alias gl="git log --graph --abbrev-commit --decorate --date=relative --format=format:'%C(bold blue)%h%C(reset) %C(bold green)(%ar)%C(reset) %C(white)%s%C(reset) %C(dim white)- %an%C(reset)%C(auto)%d%C(reset)' --all"
+alias gco='git checkout'
+alias gcb='git checkout -b'
+alias gri='git rebase -i'
+alias grc='git rebase --continue'
+alias gra='git rebase --abort'
+
 # neovim
-alias gg='nvim -c "Git"'
-alias gg='nvim -c "Git"'
-EOF
-)" "${HOME}/.zshrc"
+alias v='nvim'
+alias vi='nvim'
+BLOCK_EOF
     success "Aliases configured"
 }
 
 setup_zsh_functions() {
     info "=== zsh functions ==="
-    add_block "# Custom shell functions" "$(cat <<'EOF'
+    add_block "# Custom shell functions" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # Custom shell functions
 
 # fh — fuzzy history search; selected command is loaded into the prompt for editing
@@ -972,11 +1202,12 @@ fcd() {
     [[ -n "$dir" ]] && cd "$dir"
 }
 
-# fgb — fuzzy git branch checkout
+# fgb — fuzzy git branch checkout, newest-first with a commit preview
 fgb() {
     local branch
-    branch=$(git branch --all 2>/dev/null | grep -v HEAD \
-        | fzf | sed 's|.*remotes/origin/||' | tr -d ' ')
+    branch=$(git branch --all --sort=-committerdate 2>/dev/null | grep -v HEAD \
+        | fzf --preview 'git log --oneline --graph --date=relative --color=always -20 $(sed "s|.*remotes/origin/||;s|^[* ]*||" <<< {})' \
+        | sed 's|.*remotes/origin/||' | tr -d ' ')
     [[ -n "$branch" ]] && git checkout "$branch"
 }
 
@@ -1001,21 +1232,55 @@ frg() {
     line=$(echo "$result" | cut -d: -f2)
     nvim +"$line" "$file"
 }
-EOF
-)" "${HOME}/.zshrc"
+
+# fshow — browse commits with a delta diff preview; enter copies the SHA
+fshow() {
+    git log --graph --color=always --date=relative \
+        --format="%C(auto)%h %C(green)(%ar)%C(reset) %s %C(dim white)- %an%C(reset)" "$@" \
+    | fzf --ansi --no-sort --reverse --tiebreak=index \
+          --preview 'grep -o "[a-f0-9]\{7,\}" <<< {} | head -1 | xargs -I% git show --color=always % | delta' \
+          --bind 'enter:execute(grep -o "[a-f0-9]\{7,\}" <<< {} | head -1 | xargs -I% git show % | less -R)'
+}
+BLOCK_EOF
     success "Shell functions configured"
 }
 
 setup_tmux_autoattach() {
     info "=== tmux auto-attach ==="
-    add_block "# tmux auto-attach" "$(cat <<'EOF'
+    add_block "# tmux auto-attach" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # tmux auto-attach
 if command -v tmux &>/dev/null && [ -z "$TMUX" ]; then
   tmux attach -t main 2>/dev/null || tmux new -s main
 fi
-EOF
-)" "${HOME}/.zshrc"
+BLOCK_EOF
     success "tmux auto-attach configured"
+}
+
+setup_gitconfig() {
+    info "=== git config ==="
+    local gitconfig="${HOME}/.gitconfig"
+    local shared="${SCRIPT_DIR}/git/gitconfig"
+
+    if [[ ! -f "$shared" ]]; then
+        error "shared gitconfig not found: $shared"
+        return 1
+    fi
+
+    # Included rather than copied, so edits to the repo take effect immediately
+    # and your identity/credentials stay in ~/.gitconfig, out of version control.
+    if git config --global --get-all include.path 2>/dev/null | grep -qxF "$shared"; then
+        success "gitconfig include already present"
+    elif $DRY_RUN; then
+        info "[dry-run] would add include.path=$shared to $gitconfig"
+    else
+        backup_if_exists "$gitconfig"
+        git config --global --add include.path "$shared"
+        success "gitconfig included from $shared"
+    fi
+
+    if ! git config --global --get user.email >/dev/null 2>&1; then
+        manual "Set your git identity: git config --global user.name 'Your Name' && git config --global user.email you@example.com"
+    fi
 }
 
 setup_nvim_config() {
@@ -1041,6 +1306,10 @@ setup_nvim_config() {
         success "Neovim config symlinked: $target -> $source"
     fi
 
+    # Write the pinned Mason registry snapshot where the nvim config reads it.
+    # This is what freezes every LSP server, formatter, linter and DAP adapter.
+    setup_mason_pin
+
     if $DRY_RUN; then
         info "[dry-run] would run: nvim --headless '+Lazy! restore'"
     elif command_exists nvim; then
@@ -1051,6 +1320,33 @@ setup_nvim_config() {
     else
         warn "nvim not in PATH yet; skipping Lazy restore (re-run setup after shell reload)"
     fi
+}
+
+setup_mason_pin() {
+    # nvim/lua/mason-pin.lua is generated from versions.lock so the Lua config
+    # never needs editing by hand and there is exactly one source of truth.
+    local out="${SCRIPT_DIR}/nvim/lua/mason-pin.lua"
+    local registry; registry=$(pin MASON_REGISTRY)
+
+    if [[ -f "$out" ]] && grep -qF "$registry" "$out"; then
+        success "Mason registry pin already at ${registry}"
+        return 0
+    fi
+    if $DRY_RUN; then
+        info "[dry-run] would write Mason registry pin ${registry} to $out"
+        return 0
+    fi
+    cat > "$out" <<EOF
+-- GENERATED by setup.sh from versions.lock — do not edit by hand.
+-- Change MASON_REGISTRY in versions.lock (or run ./setup.sh --update) instead.
+--
+-- Pinning the registry snapshot freezes every LSP server, formatter, linter and
+-- DAP adapter version. Without it, Mason silently upgrades all of them.
+return {
+    registry = "github:mason-org/mason-registry@${registry}",
+}
+EOF
+    success "Mason registry pinned to ${registry}"
 }
 
 setup_clipboard_helper() {
@@ -1098,25 +1394,237 @@ setup_tmux_config() {
         return 1
     fi
 
-    backup_if_exists "$target"
-    run cp "$source" "$target"
-
-    # On Linux replace pbcopy with the cross-display-server clipboard helper
-    if [[ "$(detect_os)" != "macos" ]]; then
-        sed_inplace 's|copy-pipe-and-cancel "pbcopy"|copy-pipe-and-cancel "tmux-clipboard"|' "$target"
+    # Symlinked, not copied: edits to the repo take effect on the next
+    # `prefix + r` with no re-run of this script. The old copy+sed approach
+    # meant repo changes were invisible until setup.sh ran again. The
+    # pbcopy/tmux-clipboard choice now lives inside tmux.conf as an if-shell.
+    if [[ -L "$target" && "$(readlink "$target")" == "$source" ]]; then
+        success "tmux config symlink already correct"
+    elif $DRY_RUN; then
+        backup_if_exists "$target"
+        info "[dry-run] would symlink $target -> $source"
+    else
+        backup_if_exists "$target"
+        rm -f "$target"
+        ln -s "$source" "$target"
+        success "tmux config symlinked: $target -> $source"
     fi
 
-    success "tmux config installed"
+    setup_tmux_plugin_pins
 
     local tpm_install="${HOME}/.tmux/plugins/tpm/bin/install_plugins"
     if $DRY_RUN; then
         info "[dry-run] would run tpm's install_plugins if available"
     elif [[ -x "$tpm_install" ]]; then
-        "$tpm_install" || warn "tpm plugin install had issues"
+        "$tpm_install" >/dev/null 2>&1 || warn "tpm plugin install had issues"
         success "tmux plugins installed"
     else
         warn "tpm not ready; open tmux and press prefix+I to install plugins"
     fi
+}
+
+setup_tmux_plugin_pins() {
+    # tmux.conf declares plugins with tpm's `repo#ref` syntax. Rewrite those
+    # refs from versions.lock so tmux plugins are pinned by the same mechanism
+    # as everything else, instead of tracking their default branches.
+    local conf="${SCRIPT_DIR}/tmux/tmux.conf"
+    local nav cat_tmux cpu
+    nav=$(pin TMUX_NAVIGATOR_COMMIT)
+    cat_tmux=$(pin CATPPUCCIN_TMUX_VERSION)
+    cpu=$(pin TMUX_CPU_COMMIT)
+
+    if $DRY_RUN; then
+        info "[dry-run] would pin tmux plugins in tmux.conf (navigator=${nav:0:12} catppuccin=${cat_tmux} cpu=${cpu:0:12})"
+        return 0
+    fi
+
+    sed_inplace "s|^set -g @plugin 'christoomey/vim-tmux-navigator.*|set -g @plugin 'christoomey/vim-tmux-navigator#${nav}'|" "$conf"
+    sed_inplace "s|^set -g @plugin 'catppuccin/tmux.*|set -g @plugin 'catppuccin/tmux#${cat_tmux}'|" "$conf"
+    sed_inplace "s|^set -g @plugin 'tmux-plugins/tmux-cpu.*|set -g @plugin 'tmux-plugins/tmux-cpu#${cpu}'|" "$conf"
+    success "tmux plugins pinned from versions.lock"
+}
+
+# -----------------------------------------------------------------------------
+# --update : re-resolve every pinned version, rewrite versions.lock, install nothing
+# -----------------------------------------------------------------------------
+
+# Map of lock key -> how to resolve its latest value.
+# "release:<repo>" latest GitHub release tag
+# "tag:<repo>"     latest git tag (repos that tag but publish no releases)
+# "commit:<repo>"  latest commit SHA (repos with no tags at all)
+# "mason"          latest mason-registry snapshot
+# "manual"         never auto-resolved (explained inline)
+resolver_for() {
+    case "$1" in
+        NVIM_VERSION)                    echo "release:neovim/neovim" ;;
+        FZF_VERSION)                     echo "release:junegunn/fzf" ;;
+        RIPGREP_VERSION)                 echo "release:BurntSushi/ripgrep" ;;
+        FD_VERSION)                      echo "release:sharkdp/fd" ;;
+        BAT_VERSION)                     echo "release:sharkdp/bat" ;;
+        EZA_VERSION)                     echo "release:eza-community/eza" ;;
+        JQ_VERSION)                      echo "release:jqlang/jq" ;;
+        YQ_VERSION)                      echo "release:mikefarah/yq" ;;
+        K9S_VERSION)                     echo "release:derailed/k9s" ;;
+        LAZYGIT_VERSION)                 echo "release:jesseduffield/lazygit" ;;
+        DELTA_VERSION)                   echo "release:dandavison/delta" ;;
+        TREE_SITTER_CLI_VERSION)         echo "tag:tree-sitter/tree-sitter" ;;
+        OHMYZSH_COMMIT)                  echo "commit:ohmyzsh/ohmyzsh" ;;
+        P10K_VERSION)                    echo "release:romkatv/powerlevel10k" ;;
+        ZSH_SYNTAX_HIGHLIGHTING_VERSION) echo "tag:zsh-users/zsh-syntax-highlighting" ;;
+        ZSH_AUTOSUGGESTIONS_VERSION)     echo "tag:zsh-users/zsh-autosuggestions" ;;
+        TPM_VERSION)                     echo "tag:tmux-plugins/tpm" ;;
+        TMUX_NAVIGATOR_COMMIT)           echo "commit:christoomey/vim-tmux-navigator" ;;
+        CATPPUCCIN_TMUX_VERSION)         echo "release:catppuccin/tmux" ;;
+        TMUX_CPU_COMMIT)                 echo "commit:tmux-plugins/tmux-cpu" ;;
+        NVM_VERSION)                     echo "release:nvm-sh/nvm" ;;
+        PYENV_VERSION)                   echo "release:pyenv/pyenv" ;;
+        GOENV_VERSION)                   echo "release:go-nv/goenv" ;;
+        TFENV_VERSION)                   echo "release:tfutils/tfenv" ;;
+        MASON_REGISTRY)                  echo "mason" ;;
+        *)                               echo "manual" ;;
+    esac
+}
+
+resolve_latest() {
+    local spec="$1" kind repo
+    kind="${spec%%:*}"
+    repo="${spec#*:}"
+    case "$kind" in
+        release) github_latest_tag "$repo" ;;
+        tag)     github_latest_tag_only "$repo" ;;
+        commit)  github_latest_commit "$repo" ;;
+        mason)   mason_latest_registry ;;
+        *)       echo "" ;;
+    esac
+}
+
+do_update() {
+    echo "============================================="
+    echo "  Re-resolving pinned versions"
+    echo "============================================="
+    echo ""
+    info "Querying upstream for the latest version of each pinned tool..."
+    echo ""
+
+    local changed=0 unchanged=0 failed=0
+    local key spec latest current
+    local -a report=()
+
+    # Preserve file order and all comments: rewrite values in place.
+    local tmp; tmp=$(mktemp)
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Pass through comments and blanks untouched
+        if [[ -z "${line// }" || "${line#"${line%%[![:space:]]*}"}" == \#* || "$line" != *=* ]]; then
+            printf '%s\n' "$line" >> "$tmp"
+            continue
+        fi
+        key="${line%%=*}"
+        current="${line#*=}"
+        spec=$(resolver_for "$key")
+
+        if [[ "$spec" == "manual" ]]; then
+            printf '%s\n' "$line" >> "$tmp"
+            continue
+        fi
+
+        latest=$(resolve_latest "$spec")
+        if [[ -z "$latest" ]]; then
+            warn "$key: could not resolve latest (network or rate limit) — keeping ${current}"
+            printf '%s\n' "$line" >> "$tmp"
+            failed=$((failed + 1))
+            continue
+        fi
+
+        if [[ "$latest" == "$current" ]]; then
+            printf '%s\n' "$line" >> "$tmp"
+            unchanged=$((unchanged + 1))
+        else
+            printf '%s=%s\n' "$key" "$latest" >> "$tmp"
+            report+=("  ${key}: ${current} → ${latest}")
+            changed=$((changed + 1))
+        fi
+    done < "$LOCKFILE"
+
+    if $DRY_RUN; then
+        info "[dry-run] would rewrite $LOCKFILE"
+        rm -f "$tmp"
+    else
+        mv "$tmp" "$LOCKFILE"
+    fi
+
+    echo ""
+    if [[ $changed -gt 0 ]]; then
+        echo "  UPDATED (${changed}):"
+        printf '%s\n' "${report[@]}"
+    fi
+    echo ""
+    success "${changed} changed · ${unchanged} already latest · ${failed} unresolved"
+    echo ""
+    cat <<'NEXT'
+  Nothing has been installed. Next steps:
+
+    git diff versions.lock     # review exactly what moved
+    ./setup.sh                 # apply the new pins
+
+  To discard these updates:
+
+    git checkout versions.lock
+
+  Note: Neovim plugins are pinned separately in nvim/lazy-lock.json. To update
+  those, run `:Lazy update` inside nvim and commit the resulting lockfile diff.
+
+NEXT
+}
+
+# -----------------------------------------------------------------------------
+# --check : report drift between versions.lock and what is actually installed
+# -----------------------------------------------------------------------------
+
+do_check() {
+    echo "============================================="
+    echo "  Installed vs. pinned"
+    echo "============================================="
+    echo ""
+
+    local drift=0
+    check_one() {
+        local name="$1" pinned="$2" installed="$3"
+        local want="${pinned#v}"; want="${want#jq-}"
+        if [[ -z "$installed" ]]; then
+            printf "  %-16s %-22s %s\n" "$name" "$pinned" "NOT INSTALLED"
+            drift=$((drift + 1))
+        elif echo "$installed" | grep -qF "$want"; then
+            printf "  %-16s %-22s ok\n" "$name" "$pinned"
+        else
+            printf "  %-16s %-22s DRIFT (installed: %s)\n" "$name" "$pinned" \
+                "$(echo "$installed" | grep -oE '[0-9][0-9.]*[0-9]' | head -1)"
+            drift=$((drift + 1))
+        fi
+    }
+
+    check_one "neovim"   "$(pin NVIM_VERSION)"    "$(nvim --version 2>/dev/null | head -1)"
+    check_one "fzf"      "$(pin FZF_VERSION)"     "$(fzf --version 2>/dev/null | head -1)"
+    check_one "ripgrep"  "$(pin RIPGREP_VERSION)" "$(rg --version 2>/dev/null | head -1)"
+    check_one "fd"       "$(pin FD_VERSION)"      "$(fd --version 2>/dev/null | head -1)"
+    check_one "bat"      "$(pin BAT_VERSION)"     "$(bat --version 2>/dev/null | head -1)"
+    check_one "jq"       "$(pin JQ_VERSION)"      "$(jq --version 2>/dev/null)"
+    check_one "yq"       "$(pin YQ_VERSION)"      "$(yq --version 2>/dev/null | head -1)"
+    check_one "k9s"      "$(pin K9S_VERSION)"     "$(k9s version 2>/dev/null | grep -i 'Version:' | head -1)"
+    check_one "lazygit"  "$(pin LAZYGIT_VERSION)" "$(lazygit --version 2>/dev/null | head -1)"
+    check_one "delta"    "$(pin DELTA_VERSION)"   "$(delta --version 2>/dev/null | head -1)"
+    check_one "tree-sitter" "$(pin TREE_SITTER_CLI_VERSION)" "$(tree-sitter --version 2>/dev/null)"
+
+    echo ""
+    printf "  %-16s %s\n" "mason registry" "$(pin MASON_REGISTRY)"
+    printf "  %-16s %s\n" "psql" "$(psql --version 2>/dev/null || echo 'NOT INSTALLED (needed for nvim database UI)')"
+    echo ""
+    if [[ $drift -eq 0 ]]; then
+        success "No drift — everything matches versions.lock"
+    else
+        warn "${drift} tool(s) differ from versions.lock — run ./setup.sh to reconcile"
+    fi
+    echo ""
 }
 
 # -----------------------------------------------------------------------------
@@ -1129,7 +1637,10 @@ check_prerequisites() {
     command_exists git  || missing+=("git")
     command_exists curl || missing+=("curl")
     command_exists perl || missing+=("perl")
-    command_exists make || missing+=("make")
+    # `make` is no longer required: the only consumer was telescope-fzf-native,
+    # which has been replaced by fzf-lua (pure Lua, shells out to the fzf binary).
+    # It stays listed for pyenv/goenv native builds but is no longer fatal.
+    command_exists make || warn "make not found — needed only to build Python via pyenv or cgo tooling"
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         error "Missing required tools: ${missing[*]}"
@@ -1149,6 +1660,13 @@ check_prerequisites() {
 # -----------------------------------------------------------------------------
 
 main() {
+    load_lockfile
+
+    case "$MODE" in
+        update) do_update; exit 0 ;;
+        check)  do_check;  exit 0 ;;
+    esac
+
     echo "============================================="
     echo "  Developer Environment Setup"
     echo "============================================="
@@ -1158,6 +1676,7 @@ main() {
 
     local os; os=$(detect_os)
     info "OS: $os | Arch: $(detect_arch)"
+    info "Versions: pinned by versions.lock (no network version resolution)"
     echo ""
 
     case "$os" in
@@ -1176,16 +1695,13 @@ main() {
                 eval "$(/usr/local/bin/brew shellenv)"
             fi
             # Add Homebrew bin to PATH permanently in .zshrc
-            add_block "# Homebrew" "$(cat <<'EOF'
+            add_block "# Homebrew" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # Homebrew — Apple Silicon uses /opt/homebrew, Intel uses /usr/local
 [[ -d /opt/homebrew/bin ]] && export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
 [[ -d /usr/local/bin ]] && export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
-EOF
-)" "${HOME}/.zshrc"
+BLOCK_EOF
             # tfenv requires GNU grep; macOS ships with BSD grep
-            if command_exists brew && brew list grep &>/dev/null; then
-                :
-            else
+            if ! (command_exists brew && brew list grep &>/dev/null); then
                 run brew install grep
             fi
             # Add GNU grep to PATH so it takes precedence over BSD grep
@@ -1229,6 +1745,9 @@ EOF
     install_jq
     install_yq
     install_k9s
+    install_lazygit
+    install_delta
+    install_postgres_client
     install_nvm
     install_pyenv
     install_goenv
@@ -1245,6 +1764,7 @@ EOF
     setup_zsh_functions
     setup_tmux_autoattach
     setup_clipboard_helper
+    setup_gitconfig
     setup_nvim_config
     setup_tmux_config
 
@@ -1288,23 +1808,29 @@ EOF
   4. Configure your prompt (only if no p10k.zsh in repo):
        p10k configure
 
-  5. Install Node.js:
+  5. Install language runtimes (these are per-project, not pinned globally):
        nvm install --lts && nvm use --lts
-
-  6. Install Python (find latest: pyenv install --list | grep -E '^\s+3\.[0-9]+\.[0-9]+$' | tail -1):
        pyenv install <version> && pyenv global <version>
-
-  7. Install Go (find latest: goenv install --list | tail -5):
        goenv install <version> && goenv global <version>
-
-  8. Install Java:
        sdk install java
-
-  9. Install Terraform:
        tfenv install latest && tfenv use latest
 
-  10. Install tmux plugins:
+  6. Install tmux plugins:
        Open tmux, then press: Ctrl-s + I
+
+  7. Optional — database UI connections. Create a file that is never committed:
+       ~/.config/nvim-dbs.lua   (see README "Database" section for the format)
+
+  VERSION MANAGEMENT
+  ─────────────────────────────────────────────
+
+    ./setup.sh --check     see installed vs. pinned
+    ./setup.sh --update    re-resolve latest, rewrite versions.lock (installs nothing)
+    git diff versions.lock review what would change
+    ./setup.sh             apply
+
+  Neovim plugins are pinned separately in nvim/lazy-lock.json — update with
+  `:Lazy update` inside nvim, then commit the lockfile diff.
 
 CHECKLIST
 }

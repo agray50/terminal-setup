@@ -1,0 +1,69 @@
+# =============================================================================
+# versions.lock — pinned versions for every tool setup.sh installs
+# =============================================================================
+# This file is the SINGLE SOURCE OF TRUTH for versions. A normal `./setup.sh`
+# run reads only this file and makes ZERO version-resolution network calls, so
+# installs are deterministic and reproducible across machines and over time.
+#
+# To upgrade:
+#   ./setup.sh --update     # re-resolves latest upstream versions, rewrites
+#                           # this file, installs nothing — review the diff
+#   git diff versions.lock  # inspect what moved
+#   ./setup.sh              # apply
+#
+# To roll back:  git checkout versions.lock && ./setup.sh
+# To see drift:  ./setup.sh --check
+#
+# Format: KEY=value, shell-sourceable. Comments and blank lines ignored.
+# Tags are written exactly as the upstream release tag (note the inconsistent
+# upstream conventions: some have a `v` prefix, some don't, jq uses `jq-`).
+# =============================================================================
+
+# --- Editor -----------------------------------------------------------------
+NVIM_VERSION=v0.12.5
+
+# --- CLI tools (GitHub binary releases) -------------------------------------
+FZF_VERSION=v0.74.4
+RIPGREP_VERSION=15.2.0
+FD_VERSION=v10.5.0
+BAT_VERSION=v0.26.1
+EZA_VERSION=v0.23.5
+JQ_VERSION=jq-1.8.2
+YQ_VERSION=v4.54.1
+K9S_VERSION=v0.51.0
+LAZYGIT_VERSION=v0.66.0
+DELTA_VERSION=0.20.1
+
+# --- Rust crates ------------------------------------------------------------
+TREE_SITTER_CLI_VERSION=0.26.8
+
+# --- zsh --------------------------------------------------------------------
+# oh-my-zsh publishes no tags; pinned by commit.
+OHMYZSH_COMMIT=60c9a7a839b790cd905d0fd4419435124fd1bdc0
+P10K_VERSION=v1.20.0
+ZSH_SYNTAX_HIGHLIGHTING_VERSION=0.8.0
+ZSH_AUTOSUGGESTIONS_VERSION=v0.7.1
+
+# --- tmux plugins -----------------------------------------------------------
+# These are consumed by tmux/tmux.conf via tpm's `repo#ref` syntax; setup.sh
+# rewrites the @plugin lines from these values so there is one source of truth.
+TPM_VERSION=v3.1.0
+# vim-tmux-navigator's only tag (v1.0) predates its current behaviour; pinned
+# by commit to match the nvim-side pin in nvim/lazy-lock.json.
+TMUX_NAVIGATOR_COMMIT=e41c431a0c7b7388ae7ba341f01a0d217eb3a432
+CATPPUCCIN_TMUX_VERSION=v2.3.1
+# tmux-cpu publishes no tags; pinned by commit.
+TMUX_CPU_COMMIT=bcb110d754ab2417de824c464730c412a3eb2769
+
+# --- Language version managers ----------------------------------------------
+NVM_VERSION=v0.40.8
+PYENV_VERSION=v2.8.8
+GOENV_VERSION=3.2.1
+TFENV_VERSION=v3.2.2
+
+# --- Neovim: Mason package registry -----------------------------------------
+# Pinning the registry snapshot freezes EVERY LSP server, formatter, linter and
+# DAP adapter version deterministically with one line. The registry publishes
+# many times a day; without this pin, Mason silently upgrades all of them.
+# Consumed by nvim/lua/plugins/mason.lua.
+MASON_REGISTRY=2026-10-06-unique-device
