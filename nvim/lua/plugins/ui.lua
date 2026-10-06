@@ -139,26 +139,32 @@ return {
 	{
 		"folke/flash.nvim",
 		event = "VeryLazy",
-		-- NOTE: this takes over `s` and `S`, which in stock vim are
-		-- substitute-char and substitute-line. `cl` and `cc` do those jobs, and
-		-- in practice jumping is wanted far more often than `s`. To revert,
-		-- change these two lhs values to <leader>j / <leader>J.
+		-- Deliberately does NOT take over `s` / `S` / visual `R`.
+		--
+		-- flash's own defaults bind those, but in stock vim they are
+		-- substitute-char, substitute-line and visual-substitute — real
+		-- operators with no equally short replacement (`cl` / `cc` are the
+		-- usual suggestion, but they are not the same keystroke count and `s`
+		-- in particular is muscle memory). Jumping lives on <leader>j instead.
+		--
+		-- The two bindings kept on their flash defaults are operator-pending
+		-- only (`dr`, `yR`, …), where vim has no default meaning to shadow.
 		keys = {
 			{
-				"s",
+				"<leader>j",
 				mode = { "n", "x", "o" },
 				function()
 					require("flash").jump()
 				end,
-				desc = "Flash jump",
+				desc = "󱐋 Flash jump",
 			},
 			{
-				"S",
+				"<leader>J",
 				mode = { "n", "x", "o" },
 				function()
 					require("flash").treesitter()
 				end,
-				desc = "Flash treesitter select",
+				desc = "󱐋 Flash treesitter select",
 			},
 			{
 				"r",
@@ -169,8 +175,10 @@ return {
 				desc = "Remote flash (operate elsewhere)",
 			},
 			{
+				-- Operator-pending only. The `x` (visual) mode binding flash
+				-- ships here is dropped: visual `R` is change-whole-lines.
 				"R",
-				mode = { "o", "x" },
+				mode = "o",
 				function()
 					require("flash").treesitter_search()
 				end,

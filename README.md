@@ -236,7 +236,7 @@ previews.
 | `gh` | Symbol finder — definitions, references and implementations in one picker |
 | `K` / `gK` | Hover / signature help (`<C-s>` for signature help in insert mode) |
 | `grn` / `gra` | Rename / code action (Neovim defaults) |
-| `s` / `S` | Flash jump / flash treesitter select |
+| `<leader>j` / `<leader>J` | Flash jump / flash treesitter select |
 | `gsa` `gsd` `gsr` | Surround: add / delete / replace |
 | `]d` `[d` | Next / previous diagnostic |
 | `]e` `[e` | Next / previous **error** only |
@@ -434,6 +434,12 @@ configurations work unchanged.
 | `<leader>p` | Paste over selection without clobbering the register |
 | `<leader>X` | Delete without yanking |
 | `<leader>?` | Buffer-local keymaps |
+| `<leader>j` / `<leader>J` | Flash jump / flash treesitter select |
+
+> `s`, `S` and visual `R` keep their stock vim meanings (substitute char, line
+> and visual lines). flash.nvim binds those by default; here jumping is on
+> `<leader>j` instead. flash's operator-pending `r` and `R` (`dr`, `yR`) are
+> kept, since vim has no default meaning there to shadow.
 
 > The system clipboard is deliberately **not** wired to every yank (`clipboard=unnamedplus` is
 > off), so `d` and `x` never clobber what you copied from the browser. Use `<leader>y` to cross

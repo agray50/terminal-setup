@@ -58,6 +58,8 @@ return {
 			{ "<leader>p", desc = "Paste without yanking replaced" },
 			{ "<leader>P", desc = "Paste from system clipboard" },
 			{ "<leader>X", desc = "Delete without yanking" },
+			{ "<leader>j", desc = "󱐋 Flash jump" },
+			{ "<leader>J", desc = "󱐋 Flash treesitter select" },
 
 			-- Document the non-leader keys that aren't self-evident. These
 			-- appear when you press the prefix, so ] and [ become discoverable
