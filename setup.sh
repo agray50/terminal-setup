@@ -1341,6 +1341,13 @@ setup_zsh_functions() {
     add_block "functions" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # Custom shell functions
 
+# zsh refuses to define a function whose name is already an alias, and older
+# versions of this setup shipped some of these as aliases (notably `nf`). A
+# leftover alias aborts parsing of the rest of this block with
+# "defining function based on alias", taking every later function with it.
+# Clearing them first makes this block self-contained whatever precedes it.
+unalias fh nf fcd fgb fkill frg fshow 2>/dev/null || true
+
 # fh — fuzzy history search; selected command is loaded into the prompt for editing
 fh() {
     print -z $(fc -ln 1 | fzf --tac --no-sort)

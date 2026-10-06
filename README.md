@@ -98,6 +98,12 @@ If something breaks, roll back:
 git checkout versions.lock && ./setup.sh
 ```
 
+A `<KEY>_CONSTRAINT` entry in `versions.lock` pins a tool to a version *series*, so `--update`
+can never cross a breaking major. goenv uses this: 3.x is a Go rewrite that dropped the
+`bin/goenv` shell implementation this setup integrates with, so `GOENV_VERSION_CONSTRAINT=2.`
+keeps it on the 2.x line. Without it, an update silently replaced goenv with something that had
+no `goenv` executable at all.
+
 Three things are pinned separately, by design:
 
 | What | Pinned in | Update with |
@@ -126,6 +132,8 @@ without the pin every language server, formatter and linter silently upgrades un
 | Icons show as boxes (tofu) | Your terminal font is not a Nerd Font. See post-install step 2. Every codepoint used here is in JetBrainsMono and Hack Nerd Font. |
 | Plugin versions drifted | `git checkout nvim/lazy-lock.json` then `:Lazy restore`. |
 | Everything drifted | `./setup.sh --check` shows what differs from the lockfile. |
+| `command not found: goenv` (or pyenv) on shell start | A legacy un-delimited block from an older version of this script. `./setup.sh` migrates it; it backs `~/.zshrc` up first. |
+| `unknown style 'zdiff3' given for 'merge.conflictstyle'` | Your git predates 2.35. `./setup.sh` regenerates `git/gitconfig.local` for the local git version — run it on that machine. |
 
 ### Verifying a change
 
@@ -184,7 +192,7 @@ had been missing when it drifted to documenting plugins and keys the config no l
 | rustup | Rust (and `tree-sitter` CLI, which compiles Neovim's parsers) |
 | nvm | Node.js — lazy-loaded on first use |
 | pyenv | Python — lazy-loaded on first use |
-| goenv | Go — lazy-loaded on first use |
+| goenv | Go — lazy-loaded on first use (pinned to 2.x; see `versions.lock`) |
 | SDKMAN | Java / JVM — eagerly loaded, because `./mvnw` and `./gradlew` need `JAVA_HOME` |
 | tfenv | Terraform |
 
@@ -568,6 +576,32 @@ than a plugin; `<leader>qz` closes everything via a registry in `lua/util/panels
 `git/gitconfig` is **included** from `~/.gitconfig` (not copied), so edits take effect
 immediately and your identity stays out of this repo.
 
+### Cross-version compatibility
+
+This repo is used on machines with very different git versions — macOS ships 2.50, Ubuntu 20.04
+ships 2.24. Git *validates* some config values rather than ignoring ones it doesn't know, so a
+single unsupported value breaks **every** git command on the older machine:
+
+```
+error: unknown style 'zdiff3' given for 'merge.conflictstyle'
+```
+
+So the committed `git/gitconfig` holds only settings that work on git **2.24+**, and anything
+newer is written per machine by `setup.sh` into `git/gitconfig.local` (generated, gitignored,
+included last). You get the best configuration each machine's git actually supports:
+
+| Setting | Needs git | On git 2.24 |
+|---|---|---|
+| `merge.conflictstyle = zdiff3` | 2.35 | falls back to `diff3` (still shows the common ancestor) |
+| `help.autocorrect = prompt` | 2.37 | omitted |
+| `push.autoSetupRemote` | 2.37 | omitted |
+| `rebase.updateRefs` | 2.38 | omitted |
+| `fetch.all` | 2.41 | omitted |
+| `init.defaultBranch` | 2.28 | omitted |
+
+`./scripts/verify.sh gitcompat` fails if a version-gated value is ever committed to the shared
+file, and confirms git can read the result.
+
 The settings that matter most for rebasing:
 
 | Setting | Why |
@@ -626,6 +660,23 @@ Aliases: `git lg` (graph log), `git ri` / `rc` / `ra` (rebase interactive / cont
 
 New terminals auto-attach to a tmux session named `main`. nvm, pyenv and goenv are lazy-loaded
 on first use so they cost nothing at shell startup.
+
+### Managed `.zshrc` regions
+
+Everything this script writes to `~/.zshrc` lives between explicit delimiters:
+
+```sh
+# >>> terminal-setup: aliases >>>
+...
+# <<< terminal-setup: aliases <<<
+```
+
+The whole region is **regenerated** on every run, so changes to `setup.sh` always reach every
+machine and a damaged region repairs itself. Anything outside the delimiters is yours and is
+never touched. Earlier versions appended un-delimited blocks and only checked whether a header
+line existed, which meant a stale block blocked its own replacement forever — that is how a
+legacy eager `eval "$(goenv init -)"` survived and produced `command not found: goenv` on every
+terminal start. `setup.sh` migrates those legacy blocks once, backing `~/.zshrc` up first.
 
 ---
 

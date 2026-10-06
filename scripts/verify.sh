@@ -231,6 +231,78 @@ check_lualine_theme() {
 }
 
 # -----------------------------------------------------------------------------
+# Shared gitconfig stays compatible with the oldest supported git
+# -----------------------------------------------------------------------------
+# This repo is used on macOS (git 2.50) and Ubuntu 20.04 (git 2.24). Git
+# VALIDATES some config values rather than ignoring unknown ones, so a value the
+# local git does not understand makes EVERY git command fail:
+#
+#   error: unknown style 'zdiff3' given for 'merge.conflictstyle'
+#
+# Those settings must live in the generated per-machine git/gitconfig.local, not
+# in the committed git/gitconfig. This check enforces that.
+MIN_GIT="2.24"
+
+check_gitconfig_compat() {
+    head1 "gitconfig compatibility (min git ${MIN_GIT})"
+    local cfg="$REPO/git/gitconfig"
+    [[ -f "$cfg" ]] || { fail "git/gitconfig missing"; return; }
+
+    # "setting=value|minimum git version" — values git validates and rejects.
+    local -a gated=(
+        "conflictstyle *= *zdiff3|2.35"
+        "autocorrect *= *prompt|2.37"
+    )
+    local bad=0 entry pattern minver hit
+    for entry in "${gated[@]}"; do
+        pattern="${entry%%|*}"
+        minver="${entry##*|}"
+        hit=$(grep -nE "^[[:space:]]*${pattern}" "$cfg" || true)
+        if [[ -n "$hit" ]]; then
+            fail "needs git >= ${minver}, but git/gitconfig is shared with git ${MIN_GIT} machines:"
+            echo "$hit" | sed 's/^/      /'
+            echo "      -> move it to setup_gitconfig_version in setup.sh"
+            bad=1
+        fi
+    done
+    [[ $bad -eq 0 ]] && pass "no version-gated values in the committed gitconfig"
+
+    # The generated file must exist and must match the local git.
+    local local_cfg="$REPO/git/gitconfig.local"
+    if [[ ! -f "$local_cfg" ]]; then
+        warn "git/gitconfig.local not generated yet — run ./setup.sh"
+        return
+    fi
+    local want
+    if git_version_at_least_check 2.35; then want="zdiff3"; else want="diff3"; fi
+    if grep -qE "^[[:space:]]*conflictstyle = ${want}$" "$local_cfg"; then
+        pass "gitconfig.local matches local git ($(git --version | sed -n 's/^git version //p')): conflictstyle=${want}"
+    else
+        fail "gitconfig.local does not match the local git version — re-run ./setup.sh"
+    fi
+
+    # Prove git can actually read the whole config.
+    if git -C "$REPO" status >/dev/null 2>&1; then
+        pass "git reads the resulting config without error"
+    else
+        fail "git errors reading the config:"
+        git -C "$REPO" status 2>&1 | sed 's/^/      /' | head -3
+    fi
+}
+
+git_version_at_least_check() {
+    local want="$1" have
+    have=$(git --version 2>/dev/null | sed -n 's/^git version \([0-9.]*\).*/\1/p')
+    [[ -z "$have" ]] && return 1
+    local wM wm hM hm
+    wM="${want%%.*}"; wm="${want#*.}"; wm="${wm%%.*}"
+    hM="${have%%.*}"; hm="${have#*.}"; hm="${hm%%.*}"
+    [[ "$hM" -gt "$wM" ]] && return 0
+    [[ "$hM" -lt "$wM" ]] && return 1
+    [[ "$hm" -ge "$wm" ]]
+}
+
+# -----------------------------------------------------------------------------
 # Statusline renders with its separators and icons intact
 # -----------------------------------------------------------------------------
 # Writing config files through a shell heredoc has twice silently stripped
@@ -369,10 +441,12 @@ case "$ONLY" in
     notify)   check_notifications ;;
     theme)    check_lualine_theme ;;
     statusline) check_statusline ;;
+    gitcompat)  check_gitconfig_compat ;;
     keymaps)  check_keymaps ;;
-    all)      check_lua; check_shell; check_lockfile; check_lualine_theme
-              check_statusline; check_notifications; check_keymaps ;;
-    *)        echo "Usage: $0 [all|lua|shell|lock|theme|statusline|notify|keymaps]"; exit 2 ;;
+    all)      check_lua; check_shell; check_lockfile; check_gitconfig_compat
+              check_lualine_theme; check_statusline; check_notifications
+              check_keymaps ;;
+    *)        echo "Usage: $0 [all|lua|shell|lock|gitcompat|theme|statusline|notify|keymaps]"; exit 2 ;;
 esac
 
 echo ""

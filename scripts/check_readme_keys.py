@@ -48,14 +48,34 @@ for line in pathlib.Path(keys_file).read_text().splitlines():
 
 readme = pathlib.Path(readme_file).read_text()
 
-# Only look at table rows, and only at the first cell (the key column).
+# Only look at tables whose first column is actually "Key", and only at that
+# first cell. Other tables in the README (troubleshooting symptoms, tool lists,
+# config settings) also put backticked text in column one, and treating those as
+# keybindings produced false failures like "command not found: goenv".
 documented = set()
-for row in re.findall(r"^\|(.+?)\|", readme, re.MULTILINE):
+in_key_table = False
+for line in readme.split("\n"):
+    stripped = line.strip()
+    if not stripped.startswith("|"):
+        in_key_table = False
+        continue
+    cells = [c.strip() for c in stripped.strip("|").split("|")]
+    if not cells:
+        continue
+    # Header row: start collecting only if this table's first column is "Key".
+    if cells[0] == "Key":
+        in_key_table = True
+        continue
+    if set(cells[0]) <= set("-: "):   # the |---|---| separator row
+        continue
+    if not in_key_table:
+        continue
+    first = cells[0]
     # Match double-backtick spans first so a key containing a literal backtick
     # (e.g. <leader>b`, "last used buffer") survives intact.
-    for key in re.findall(r"``\s*(.+?)\s*``", row):
+    for key in re.findall(r"``\s*(.+?)\s*``", first):
         documented.add(key.replace("\\`", "`"))
-    for key in re.findall(r"(?<!`)`([^`]+)`(?!`)", row):
+    for key in re.findall(r"(?<!`)`([^`]+)`(?!`)", first):
         documented.add(key)
 
 # Things that legitimately appear in a key column but are not nvim mappings.
