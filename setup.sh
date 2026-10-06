@@ -191,28 +191,81 @@ add_line() {
     fi
 }
 
-# Append a block to a file only if its marker line is not already present.
-# Content comes from STDIN, not an argument:
+# Write a managed block into a file, replacing it if it already exists.
 #
-#     add_block "# marker" ~/.zshrc <<'EOF'
+# Each block is wrapped in explicit delimiters:
+#
+#     # >>> terminal-setup: <name> >>>
+#     ...content...
+#     # <<< terminal-setup: <name> <<<
+#
+# and the whole region is REGENERATED on every run. This replaces the previous
+# marker-only append, which could not distinguish "my block is already
+# installed" from "a stale or partially-damaged block with the same header is
+# installed" — the cause of two separate bugs: legacy eager `goenv init -`
+# blocks suppressing the lazy replacement (so goenv was never on PATH), and a
+# migration step later stripping export lines out of a freshly written block.
+#
+# Content comes from STDIN:
+#
+#     add_block "aliases" ~/.zshrc <<'EOF'
 #     ...
 #     EOF
 #
-# This deliberately avoids the `"$(cat <<'EOF' ... EOF)"` form used previously.
-# bash 3.2 — still /bin/bash on macOS, and what this script bootstraps under —
-# misparses a heredoc nested inside command substitution: while scanning for the
-# closing `)` it keeps applying quote and paren rules to the heredoc body, so any
-# `$(`, unbalanced quote or bare paren inside the block breaks the whole script.
+# Deliberately not `"$(cat <<'EOF' ...)"`: bash 3.2 — still /bin/bash on macOS,
+# which this script must bootstrap under — misparses a heredoc nested inside
+# command substitution.
 add_block() {
-    local marker="$1" file="$2" content
+    local name="$1" file="$2" content
     content=$(cat)
-    if grep -qF "$marker" "$file" 2>/dev/null; then
+
+    local begin="# >>> terminal-setup: ${name} >>>"
+    local end="# <<< terminal-setup: ${name} <<<"
+
+    [[ -f "$file" ]] || touch "$file"
+
+    # Already present and byte-identical? Nothing to do.
+    if grep -qF "$begin" "$file" 2>/dev/null; then
+        local current
+        current=$(awk -v b="$begin" -v e="$end" '
+            $0 == b { inblk = 1; next }
+            $0 == e { inblk = 0; next }
+            inblk   { print }
+        ' "$file")
+        if [[ "$current" == "$content" ]]; then
+            return 0
+        fi
+        if $DRY_RUN; then
+            info "[dry-run] would UPDATE managed block '${name}' in $file"
+            return 0
+        fi
+        # Replace the region in place, preserving its position in the file.
+        # The content is staged in a temp file because awk reads it with
+        # getline, which cannot take it on stdin alongside the target file.
+        local tmp blockfile
+        tmp=$(mktemp)
+        blockfile=$(mktemp)
+        printf '%s\n' "$content" > "$blockfile"
+        awk -v b="$begin" -v e="$end" -v f="$blockfile" '
+            $0 == b { print; while ((getline line < f) > 0) print line; close(f); skip = 1; next }
+            $0 == e { print; skip = 0; next }
+            !skip   { print }
+        ' "$file" > "$tmp"
+        mv "$tmp" "$file"
+        rm -f "$blockfile"
+        info "Updated managed block '${name}'"
         return 0
-    elif $DRY_RUN; then
-        info "[dry-run] would append block '$marker' to $file"
-    else
-        printf '\n%s\n' "$content" >> "$file"
     fi
+
+    if $DRY_RUN; then
+        info "[dry-run] would append managed block '${name}' to $file"
+        return 0
+    fi
+    {
+        printf '\n%s\n' "$begin"
+        printf '%s\n' "$content"
+        printf '%s\n' "$end"
+    } >> "$file"
 }
 
 backup_if_exists() {
@@ -875,7 +928,7 @@ install_nvm() {
     # check for the sourced script rather than our marker to avoid duplicates.
     # Sourcing nvm.sh is real shell-startup cost, so defer it behind a lazy-loading
     # stub that only runs on first actual use of nvm/node/npm/npx.
-    grep -qF 'nvm.sh' "${HOME}/.zshrc" 2>/dev/null || add_block "# nvm" "${HOME}/.zshrc" <<'BLOCK_EOF'
+    add_block "nvm" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # nvm (lazy-loaded on first use)
 export NVM_DIR="$HOME/.nvm"
 _nvm_lazy_load() {
@@ -898,7 +951,7 @@ install_pyenv() {
 
     # `pyenv init -` forks pyenv and evals its output on every shell startup;
     # defer that behind a lazy-loading stub that runs on first actual use.
-    add_block "# pyenv" "${HOME}/.zshrc" <<'BLOCK_EOF'
+    add_block "pyenv" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # pyenv (lazy-loaded on first use)
 export PYENV_ROOT="$HOME/.pyenv"
 [[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
@@ -930,7 +983,7 @@ install_goenv() {
 
     # `goenv init -` forks goenv and evals its output on every shell startup;
     # defer that behind a lazy-loading stub that runs on first actual use.
-    add_block "# goenv" "${HOME}/.zshrc" <<'BLOCK_EOF'
+    add_block "goenv" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # goenv (lazy-loaded on first use)
 export GOENV_ROOT="$HOME/.goenv"
 export PATH="$GOENV_ROOT/bin:$PATH"
@@ -992,7 +1045,7 @@ install_sdkman() {
     # (./mvnw, ./gradlew) invoke those directly rather than through a shell
     # function, so they wouldn't trigger a lazy stub. Given heavy day-to-day
     # Java use, deferring this risks JAVA_HOME being unset in a fresh shell.
-    grep -qF 'sdkman-init.sh' "${HOME}/.zshrc" 2>/dev/null || add_block "# SDKMAN" "${HOME}/.zshrc" <<'BLOCK_EOF'
+    add_block "sdkman" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # SDKMAN
 export SDKMAN_DIR="$HOME/.sdkman"
 [[ -s "$HOME/.sdkman/bin/sdkman-init.sh" ]] && source "$HOME/.sdkman/bin/sdkman-init.sh"
@@ -1080,6 +1133,115 @@ install_tfenv() {
 # Configuration
 # -----------------------------------------------------------------------------
 
+# Remove shell-init blocks written by older versions of this script.
+#
+# add_block now writes delimited, fully regenerated regions. Older versions
+# appended un-delimited blocks under plain headers and only checked whether the
+# header was present, which caused two problems on a long-lived .zshrc:
+#
+#   1. A legacy eager `eval "$(goenv init -)"` block kept the "# goenv" marker
+#      occupied, so the lazy stub that puts goenv on PATH was never installed.
+#      Symptom: `command not found: goenv` on every terminal start.
+#   2. Any block whose header already existed was skipped forever, so later
+#      improvements to the aliases/functions never reached this machine.
+#
+# Blocks are removed from their header to the following blank line. Every block
+# written by this script is a single paragraph, so that boundary is exact. The
+# two multi-paragraph blocks (aliases, functions) are reported rather than
+# deleted: the managed region is appended afterwards and later definitions win
+# in zsh, so a stale copy is cosmetic, and guessing its extent risks eating
+# hand-written config.
+migrate_legacy_zshrc() {
+    info "=== migrating legacy .zshrc blocks ==="
+    local zshrc="${HOME}/.zshrc"
+    [[ -f "$zshrc" ]] || return 0
+
+    # Single-paragraph blocks that are safe to remove wholesale.
+    local -a legacy_headers=(
+        "# nvm"
+        "# nvm (lazy-loaded on first use)"
+        "# pyenv"
+        "# pyenv (lazy-loaded on first use)"
+        "# goenv"
+        "# goenv (lazy-loaded on first use)"
+        "# SDKMAN"
+        "# tmux auto-attach"
+        "# Custom keybindings"
+    )
+
+    local found=0 h
+    for h in "${legacy_headers[@]}"; do
+        if grep -qxF "$h" "$zshrc" 2>/dev/null; then
+            found=1
+            break
+        fi
+    done
+    local sdk_count
+    sdk_count=$(grep -c 'sdkman-init.sh' "$zshrc" 2>/dev/null || echo 0)
+
+    if [[ $found -eq 0 && "$sdk_count" -le 1 ]]; then
+        success "no legacy blocks to migrate"
+        return 0
+    fi
+
+    if $DRY_RUN; then
+        info "[dry-run] would remove legacy un-delimited blocks from $zshrc"
+        return 0
+    fi
+
+    backup_if_exists "$zshrc"
+
+    # Delete each legacy header and the contiguous non-blank lines after it.
+    # Never touches a managed region: those start with "# >>> terminal-setup:".
+    local hdr_file
+    hdr_file=$(mktemp)
+    printf '%s\n' "${legacy_headers[@]}" > "$hdr_file"
+    local tmp
+    tmp=$(mktemp)
+    awk -v hdrfile="$hdr_file" '
+        BEGIN {
+            while ((getline h < hdrfile) > 0) { hdr[h] = 1 }
+            close(hdrfile)
+        }
+        # Inside a managed region: always keep, never treat as legacy.
+        /^# >>> terminal-setup:/ { managed = 1; print; next }
+        /^# <<< terminal-setup:/ { managed = 0; print; next }
+        managed { print; next }
+
+        skipping {
+            if ($0 == "") { skipping = 0 }   # blank line ends the legacy block
+            next
+        }
+        ($0 in hdr) { skipping = 1; removed++; next }
+        { print }
+        END { if (removed) printf("REMOVED %d\n", removed) > "/dev/stderr" }
+    ' "$zshrc" > "$tmp"
+    mv "$tmp" "$zshrc"
+    rm -f "$hdr_file"
+
+    # Collapse runs of blank lines left behind.
+    perl -i -0777 -pe 's/\n{3,}/\n\n/g' "$zshrc"
+
+    # Duplicate SDKMAN init: its own installer writes one and older versions of
+    # this script appended another. Keep the first.
+    perl -i -0777 -pe '
+        my $blk = qq{export SDKMAN_DIR="\$HOME/.sdkman"\n[[ -s "\$HOME/.sdkman/bin/sdkman-init.sh" ]] && source "\$HOME/.sdkman/bin/sdkman-init.sh"\n};
+        my $q = quotemeta $blk;
+        my $n = 0;
+        s/$q/(++$n == 1) ? $blk : ""/ge;
+    ' "$zshrc"
+
+    success "legacy un-delimited blocks removed (backed up to $BACKUP_DIR)"
+
+    # Report, don't delete, the multi-paragraph ones.
+    local leftover=""
+    grep -qxF "# Custom aliases" "$zshrc" 2>/dev/null && leftover="${leftover} '# Custom aliases'"
+    grep -qxF "# Custom shell functions" "$zshrc" 2>/dev/null && leftover="${leftover} '# Custom shell functions'"
+    if [[ -n "$leftover" ]]; then
+        manual "Old${leftover} block(s) remain in ~/.zshrc. The managed versions are appended after them and take precedence, so this is cosmetic — delete the old ones by hand when convenient."
+    fi
+}
+
 setup_local_bin() {
     info "=== local bin ==="
     # Always remove then re-append so ~/.local/bin ends up at the bottom of
@@ -1111,7 +1273,7 @@ setup_zsh_env() {
 
 setup_zsh_keybindings() {
     info "=== zsh keybindings ==="
-    add_block "# Custom keybindings" "${HOME}/.zshrc" <<'BLOCK_EOF'
+    add_block "keybindings" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # Custom keybindings
 bindkey -e
 bindkey '^B' backward-kill-line
@@ -1125,7 +1287,7 @@ BLOCK_EOF
 
 setup_zsh_aliases() {
     info "=== zsh aliases ==="
-    add_block "# Custom aliases" "${HOME}/.zshrc" <<'BLOCK_EOF'
+    add_block "aliases" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # Custom aliases
 
 # eza — better ls
@@ -1176,7 +1338,7 @@ BLOCK_EOF
 
 setup_zsh_functions() {
     info "=== zsh functions ==="
-    add_block "# Custom shell functions" "${HOME}/.zshrc" <<'BLOCK_EOF'
+    add_block "functions" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # Custom shell functions
 
 # fh — fuzzy history search; selected command is loaded into the prompt for editing
@@ -1247,7 +1409,7 @@ BLOCK_EOF
 
 setup_tmux_autoattach() {
     info "=== tmux auto-attach ==="
-    add_block "# tmux auto-attach" "${HOME}/.zshrc" <<'BLOCK_EOF'
+    add_block "tmux-autoattach" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # tmux auto-attach
 if command -v tmux &>/dev/null && [ -z "$TMUX" ]; then
   tmux attach -t main 2>/dev/null || tmux new -s main
@@ -1280,6 +1442,101 @@ setup_gitconfig() {
 
     if ! git config --global --get user.email >/dev/null 2>&1; then
         manual "Set your git identity: git config --global user.name 'Your Name' && git config --global user.email you@example.com"
+    fi
+}
+
+# Is the installed git at least $1 (e.g. "2.35")? bash 3.2 safe: no arrays.
+git_version_at_least() {
+    local want="$1" have
+    have=$(git --version 2>/dev/null | sed -n 's/^git version \([0-9.]*\).*/\1/p')
+    [[ -z "$have" ]] && return 1
+
+    local want_major want_minor have_major have_minor
+    want_major="${want%%.*}"; want_minor="${want#*.}"; want_minor="${want_minor%%.*}"
+    have_major="${have%%.*}"; have_minor="${have#*.}"; have_minor="${have_minor%%.*}"
+    [[ -z "$want_minor" || "$want_minor" == "$want" ]] && want_minor=0
+    [[ -z "$have_minor" || "$have_minor" == "$have" ]] && have_minor=0
+
+    if [[ "$have_major" -gt "$want_major" ]]; then return 0; fi
+    if [[ "$have_major" -lt "$want_major" ]]; then return 1; fi
+    [[ "$have_minor" -ge "$want_minor" ]]
+}
+
+setup_gitconfig_version() {
+    info "=== git config (version-gated) ==="
+    # This repo is shared between machines with different git versions — macOS
+    # ships 2.50, Ubuntu 20.04 ships 2.24. Some settings are validated by value
+    # rather than silently ignored, so a value the local git does not know makes
+    # EVERY git command fail. The reported symptom was:
+    #   error: unknown style 'zdiff3' given for 'merge.conflictstyle'
+    # on a plain `git checkout`. So the version-dependent settings live here,
+    # generated per machine, instead of in the shared committed gitconfig.
+    local out="${SCRIPT_DIR}/git/gitconfig.local"
+    local gv
+    gv=$(git --version 2>/dev/null | sed -n 's/^git version \([0-9.]*\).*/\1/p')
+    info "Detected git ${gv:-unknown}"
+
+    local conflictstyle="diff3" notes=""
+    if git_version_at_least 2.35; then
+        conflictstyle="zdiff3"
+    else
+        notes="${notes}  ; merge.conflictstyle=zdiff3 needs git >= 2.35; using diff3\n"
+    fi
+
+    if $DRY_RUN; then
+        info "[dry-run] would write $out (conflictstyle=${conflictstyle})"
+        return 0
+    fi
+
+    {
+        echo "; GENERATED by setup.sh for git ${gv:-unknown} — do not edit, not committed."
+        echo "; Regenerate by re-running ./setup.sh. Included from git/gitconfig."
+        echo ";"
+        echo "; Only settings this git version actually supports are written here, so"
+        echo "; the same repo works on macOS (git 2.50) and Ubuntu 20.04 (git 2.24)."
+        echo ""
+        echo "[merge]"
+        echo "    ; Shows the common ancestor alongside both sides, so you can see what"
+        echo "    ; each side changed rather than guessing between two variants."
+        printf '%b' "$notes"
+        echo "    conflictstyle = ${conflictstyle}"
+        echo ""
+
+        if git_version_at_least 2.38; then
+            echo "[rebase]"
+            echo "    updateRefs = true    ; stacked branches follow along on rebase"
+            echo ""
+        fi
+        if git_version_at_least 2.37; then
+            echo "[push]"
+            echo "    autoSetupRemote = true   ; \`git push\` on a new branch just works"
+            echo ""
+            echo "[help]"
+            echo "    autocorrect = prompt     ; \"git stauts\" offers to run status"
+            echo ""
+        fi
+        if git_version_at_least 2.41; then
+            echo "[fetch]"
+            echo "    all = true"
+            echo ""
+        fi
+        if git_version_at_least 2.28; then
+            echo "[init]"
+            echo "    defaultBranch = main"
+            echo ""
+        fi
+    } > "$out"
+
+    success "git/gitconfig.local generated for git ${gv} (conflictstyle=${conflictstyle})"
+
+    # Fail loudly here rather than letting the user discover it on their next
+    # checkout: prove the resulting config is actually readable by this git.
+    if git config --global --get-all include.path >/dev/null 2>&1; then
+        if ! git -C "$SCRIPT_DIR" status >/dev/null 2>&1; then
+            error "git still errors after writing gitconfig.local — run: git -C $SCRIPT_DIR status"
+        else
+            success "git config verified: plain git commands succeed"
+        fi
     fi
 }
 
@@ -1485,6 +1742,27 @@ resolver_for() {
     esac
 }
 
+# Newest tag matching a version-series prefix (e.g. "2." for goenv 2.x).
+# Checks tags rather than releases, since a maintained older series often has
+# tags without GitHub release entries.
+resolve_latest_in_series() {
+    local spec="$1" prefix="$2" repo tag
+    repo="${spec#*:}"
+    # Exact prefix match via `case`, NOT grep: the constraint contains a literal
+    # "." which grep would treat as "any character", so "2." also matched the
+    # ancient date-based tag "v20161215".
+    curl -fsL "https://api.github.com/repos/${repo}/tags?per_page=100" 2>/dev/null \
+        | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | while IFS= read -r tag; do
+            case "${tag#v}" in
+                "${prefix}"*) printf '%s\n' "$tag" ;;
+            esac
+        done \
+        | sed 's/^v//' \
+        | sort -t. -k1,1n -k2,2n -k3,3n \
+        | tail -1
+}
+
 resolve_latest() {
     local spec="$1" kind repo
     kind="${spec%%:*}"
@@ -1529,6 +1807,30 @@ do_update() {
         fi
 
         latest=$(resolve_latest "$spec")
+
+        # A <KEY>_CONSTRAINT pin restricts this tool to a version series, for
+        # tools whose next major needs a different install method. Without it,
+        # --update happily crossed goenv 2.x -> 3.x, which replaced the shell
+        # implementation with a compiled binary and broke the integration.
+        local constraint
+        constraint=$(sed -n "s/^[[:space:]]*${key}_CONSTRAINT[[:space:]]*=[[:space:]]*\\([^#]*\\).*/\\1/p" "$LOCKFILE" \
+            | head -1 | sed 's/[[:space:]]*$//')
+        if [[ -n "$constraint" && -n "$latest" ]]; then
+            if [[ "${latest#v}" != "${constraint}"* ]]; then
+                local series
+                series=$(resolve_latest_in_series "$spec" "$constraint")
+                if [[ -n "$series" ]]; then
+                    info "$key: newest is ${latest}, but constrained to ${constraint}x — using ${series}"
+                    latest="$series"
+                else
+                    warn "$key: constrained to ${constraint}x; could not resolve a matching tag — keeping ${current}"
+                    printf '%s\n' "$line" >> "$tmp"
+                    unchanged=$((unchanged + 1))
+                    continue
+                fi
+            fi
+        fi
+
         if [[ -z "$latest" ]]; then
             warn "$key: could not resolve latest (network or rate limit) — keeping ${current}"
             printf '%s\n' "$line" >> "$tmp"
@@ -1695,7 +1997,7 @@ main() {
                 eval "$(/usr/local/bin/brew shellenv)"
             fi
             # Add Homebrew bin to PATH permanently in .zshrc
-            add_block "# Homebrew" "${HOME}/.zshrc" <<'BLOCK_EOF'
+            add_block "homebrew" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # Homebrew — Apple Silicon uses /opt/homebrew, Intel uses /usr/local
 [[ -d /opt/homebrew/bin ]] && export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
 [[ -d /usr/local/bin ]] && export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
@@ -1724,6 +2026,11 @@ BLOCK_EOF
             fi
             ;;
     esac
+
+    echo ""
+    # Must run before any managed block is written, so the legacy removal can
+    # never touch freshly generated content.
+    migrate_legacy_zshrc
 
     echo ""
     info "--- Installing tools ---"
@@ -1765,6 +2072,7 @@ BLOCK_EOF
     setup_tmux_autoattach
     setup_clipboard_helper
     setup_gitconfig
+    setup_gitconfig_version
     setup_nvim_config
     setup_tmux_config
 

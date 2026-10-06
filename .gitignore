@@ -6,3 +6,4 @@
 # Database connection strings live here — see nvim/lua/plugins/dadbod.lua
 nvim/lua/local.lua
 local.env
+git/gitconfig.local

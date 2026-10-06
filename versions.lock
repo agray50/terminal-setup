@@ -17,6 +17,11 @@
 # Format: KEY=value, shell-sourceable. Comments and blank lines ignored.
 # Tags are written exactly as the upstream release tag (note the inconsistent
 # upstream conventions: some have a `v` prefix, some don't, jq uses `jq-`).
+#
+# A `<KEY>_CONSTRAINT=<prefix>` entry pins a tool to a version series: --update
+# will only consider upstream tags starting with that prefix. Use it where a
+# newer major version would need a different install method, so an update can
+# never silently break the integration.
 # =============================================================================
 
 # --- Editor -----------------------------------------------------------------
@@ -58,7 +63,13 @@ TMUX_CPU_COMMIT=bcb110d754ab2417de824c464730c412a3eb2769
 # --- Language version managers ----------------------------------------------
 NVM_VERSION=v0.40.8
 PYENV_VERSION=v2.8.8
-GOENV_VERSION=3.2.1
+# goenv 3.x is a complete Go rewrite: it dropped bin/goenv and the libexec shell
+# implementation in favour of a compiled binary, so the $GOENV_ROOT/bin + shim
+# integration this setup uses does not work on it at all. 2.2.x is the last
+# series with that layout. The _CONSTRAINT below stops --update crossing that
+# boundary; remove it only alongside a rewritten install_goenv.
+GOENV_VERSION=2.2.46
+GOENV_VERSION_CONSTRAINT=2.
 TFENV_VERSION=v3.2.2
 
 # --- Neovim: Mason package registry -----------------------------------------
