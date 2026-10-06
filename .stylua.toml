@@ -1,0 +1,10 @@
+# Formatting for the Lua in nvim/. conform.nvim runs stylua on save, so these
+# settings are what every file here converges on. Tabs + width 120 matches the
+# existing files (stylua's own defaults, which were previously implicit).
+indent_type = "Tabs"
+indent_width = 4
+column_width = 120
+line_endings = "Unix"
+quote_style = "AutoPreferDouble"
+call_parentheses = "Always"
+collapse_simple_statement = "Never"

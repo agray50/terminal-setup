@@ -31,7 +31,20 @@ return {
 
 			sources = {
 				default = { "lsp", "path", "snippets", "buffer" },
+				-- Per-filetype source lists. SQL buffers complete from the live
+				-- database schema (see plugins/dadbod.lua), so table and column
+				-- names are checked against the real database rather than guessed.
+				per_filetype = {
+					sql = { "dadbod", "snippets", "buffer" },
+					mysql = { "dadbod", "snippets", "buffer" },
+					plsql = { "dadbod", "snippets", "buffer" },
+				},
 				providers = {
+					dadbod = {
+						name = "Dadbod",
+						module = "vim_dadbod_completion.blink",
+						score_offset = 100,
+					},
 					lsp = {
 						transform_items = function(ctx, items)
 							if vim.bo[ctx.bufnr].filetype ~= "java" then
