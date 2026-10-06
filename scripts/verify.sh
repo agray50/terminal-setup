@@ -231,6 +231,65 @@ check_lualine_theme() {
 }
 
 # -----------------------------------------------------------------------------
+# Statusline renders with its separators and icons intact
+# -----------------------------------------------------------------------------
+# Writing config files through a shell heredoc has twice silently stripped
+# 3-byte Private Use Area codepoints (U+E000-U+F8FF) while leaving 4-byte ones
+# (U+F0000+) intact, turning glyph strings into "". Neither Lua nor lualine
+# complains: 'fillchars' threw an error the first time, but an empty separator
+# is simply accepted and the statusline renders flat with no divisions.
+# This renders the statusline and asserts the structure is actually there.
+check_statusline() {
+    head1 "Statusline"
+
+    # 1. No icon/symbol/separator field in the config may be an empty string.
+    local stripped
+    stripped=$(grep -rn --include='*.lua' -E \
+        '(left|right|added|modified|removed|error|warn|info|hint|readonly|unix|dos|mac|icon)[[:space:]]*=[[:space:]]*""' \
+        "$REPO/nvim" || true)
+    if [[ -n "$stripped" ]]; then
+        fail "glyph fields that are empty strings (codepoints likely stripped):"
+        echo "$stripped" | sed 's/^/      /'
+    else
+        pass "no empty glyph fields in nvim config"
+    fi
+
+    # 2. The rendered statusline must contain its separators and some content.
+    local out
+    out=$(REPO_ROOT="$REPO" nvim --headless -c 'lua
+        vim.cmd("doautocmd User VeryLazy")
+        vim.wait(2500)
+        vim.cmd.edit(vim.env.REPO_ROOT .. "/nvim/init.lua")
+        vim.wait(4000)
+        pcall(function() require("lualine").refresh() end)
+        local cfg = require("lualine.config").get_config().options
+        local sep = (cfg.section_separators or {}).left or ""
+        local sub = (cfg.component_separators or {}).left or ""
+        vim.o.columns = 120
+        local s = vim.api.nvim_eval_statusline(vim.o.statusline, { maxwidth = 120 })
+        local parts = {}
+        table.insert(parts, (sep ~= "" and "SEP_SET" or "SEP_EMPTY"))
+        table.insert(parts, (sub ~= "" and "SUB_SET" or "SUB_EMPTY"))
+        table.insert(parts, (sep ~= "" and s.str:find(sep, 1, true)) and "SEP_RENDERED" or "SEP_ABSENT")
+        table.insert(parts, (#s.str > 20) and "HAS_CONTENT" or "EMPTY_LINE")
+        io.stdout:write(table.concat(parts, " "))
+    ' -c "qa!" 2>/dev/null)
+
+    case "$out" in
+        *SEP_EMPTY*|*SUB_EMPTY*)
+            fail "statusline separators are empty strings — it will render flat (glyphs stripped?)" ;;
+        *SEP_ABSENT*)
+            fail "separators are configured but do not appear in the rendered statusline" ;;
+        *EMPTY_LINE*)
+            fail "statusline rendered with almost no content" ;;
+        *SEP_RENDERED*HAS_CONTENT*)
+            pass "statusline renders with separators and content" ;;
+        *)
+            warn "could not evaluate the statusline (got: ${out:-nothing})" ;;
+    esac
+}
+
+# -----------------------------------------------------------------------------
 # Keymaps: every key documented in the README must exist in the live config
 # -----------------------------------------------------------------------------
 check_keymaps() {
@@ -309,10 +368,11 @@ case "$ONLY" in
     lock)     check_lockfile ;;
     notify)   check_notifications ;;
     theme)    check_lualine_theme ;;
+    statusline) check_statusline ;;
     keymaps)  check_keymaps ;;
     all)      check_lua; check_shell; check_lockfile; check_lualine_theme
-              check_notifications; check_keymaps ;;
-    *)        echo "Usage: $0 [all|lua|shell|lock|theme|notify|keymaps]"; exit 2 ;;
+              check_statusline; check_notifications; check_keymaps ;;
+    *)        echo "Usage: $0 [all|lua|shell|lock|theme|statusline|notify|keymaps]"; exit 2 ;;
 esac
 
 echo ""

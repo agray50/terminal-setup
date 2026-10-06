@@ -1,8 +1,15 @@
 -- lualine — statusline.
 --
--- Was nine lines of defaults. Now surfaces the state that matters while you
--- work: which LSP clients are attached, whether a debug session is live,
--- whether format-on-save is off, and whether plugin updates are pending.
+-- Shows the state that matters while you work: git branch and diff counts,
+-- diagnostics, which LSP clients are attached, whether a debug session is live,
+-- whether format-on-save is suppressed, and whether plugin updates are pending.
+--
+-- NOTE ON GLYPHS: the separators below are powerline codepoints (U+E0B0-E0B3)
+-- and the component icons are Nerd Font ones. They need a Nerd Font set in the
+-- terminal (JetBrainsMono Nerd Font — see the README's post-install steps); in a
+-- plain font they render as boxes. `./scripts/verify.sh statusline` renders the
+-- statusline and asserts the separators are actually present, because an empty
+-- separator string is silently accepted and just looks flat.
 
 return {
 	"nvim-lualine/lualine.nvim",
@@ -20,14 +27,14 @@ return {
 			for _, client in ipairs(clients) do
 				table.insert(names, client.name)
 			end
-			return "󰒋 " .. table.concat(names, ",")
+			return "\u{f048b} " .. table.concat(names, " ")
 		end
 
 		-- Visible warning that format-on-save is suppressed, so a buffer that
 		-- silently stops formatting is never a mystery.
 		local function format_disabled()
 			if vim.b.disable_autoformat or vim.g.disable_autoformat then
-				return "󰉶 off"
+				return "\u{f0276} no format"
 			end
 			return ""
 		end
@@ -37,58 +44,67 @@ return {
 			if not ok or not dap.session() then
 				return ""
 			end
-			return "󰃤 " .. dap.status()
+			return "\u{f00e4} " .. dap.status()
 		end
 
 		return {
 			options = {
-				-- NOT "catppuccin" — catppuccin ships no theme by that name, only
-				-- catppuccin-{nvim,mocha,latte,macchiato,frappe}. lualine only
-				-- *warns* on an unknown theme and silently falls back to "auto",
-				-- so a wrong name here is invisible unless you read the message.
-				-- "catppuccin-nvim" resolves the active flavour at runtime, so it
-				-- follows whatever colorscheme is set in plugins/catppuccin.lua
-				-- rather than hard-coding mocha in a second place.
 				theme = "catppuccin-nvim",
 				globalstatus = true,
-				component_separators = { left = "", right = "" },
-				section_separators = { left = "", right = "" },
+				-- Powerline separators. Written as \u{...} escapes rather than
+				-- literal glyphs: this file has already been mangled once by a
+				-- tool that dropped 3-byte PUA codepoints, which turned these
+				-- into empty strings and made the statusline render flat with no
+				-- divisions at all. Escapes are mangle-proof.
+				section_separators = { left = "\u{e0b0}", right = "\u{e0b2}" },
+				component_separators = { left = "\u{e0b1}", right = "\u{e0b3}" },
 				disabled_filetypes = {
 					statusline = { "neo-tree", "dbui", "dapui_scopes", "dapui_watches" },
 				},
 			},
 			sections = {
 				lualine_a = { "mode" },
-				lualine_b = { "branch" },
-				lualine_c = {
+				lualine_b = {
+					{ "branch", icon = "\u{f062c}" },
 					{
 						"diff",
-						symbols = { added = "󰐕 ", modified = "󰏫 ", removed = "󰍴 " },
+						symbols = { added = "\u{f0415} ", modified = "\u{f03eb} ", removed = "\u{f0374} " },
+					},
+				},
+				lualine_c = {
+					{
+						"filename",
+						path = 1,
+						symbols = { modified = "\u{f03eb}", readonly = "\u{f033e}", unnamed = "[No Name]" },
 					},
 					{
 						"diagnostics",
-						symbols = { error = "󰅚 ", warn = "󰀪 ", info = "󰋽 ", hint = "󰌶 " },
+						symbols = {
+							error = "\u{f015a} ",
+							warn = "\u{f002a} ",
+							info = "\u{f02fd} ",
+							hint = "\u{f0336} ",
+						},
 					},
-					{ "filename", path = 1, symbols = { modified = "󰏫", readonly = "󰌾" } },
 				},
+				-- Deliberately short: encoding and fileformat are dropped. They are
+				-- utf-8/unix in essentially every buffer, so they cost width without
+				-- ever telling you anything.
 				lualine_x = {
 					{ dap_status, color = { fg = "#f38ba8" } },
 					{ format_disabled, color = { fg = "#f9e2af" } },
 					{
 						-- Pending plugin updates. Visible rather than automatic:
-						-- lazy's update checker is disabled (see init.lua) so
-						-- nothing changes under you, but you still get told.
+						-- lazy's update checker is disabled (see init.lua) so nothing
+						-- changes under you, but you still get told.
 						require("lazy.status").updates,
 						cond = require("lazy.status").has_updates,
 						color = { fg = "#cba6f7" },
 					},
 					{ lsp_clients, color = { fg = "#89dceb" } },
-					"encoding",
-					{ "fileformat", symbols = { unix = "", dos = "", mac = "" } },
-					"filetype",
 				},
-				lualine_y = { "progress" },
-				lualine_z = { "location" },
+				lualine_y = { { "filetype", icon_only = false } },
+				lualine_z = { { "location", padding = { left = 1, right = 1 } } },
 			},
 			extensions = { "neo-tree", "lazy", "mason", "trouble", "quickfix", "fugitive", "nvim-dap-ui" },
 		}

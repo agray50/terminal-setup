@@ -122,7 +122,8 @@ without the pin every language server, formatter and linter silently upgrades un
 | Treesitter errors on startup | Parser state is corrupt. `:TSInstall! <lang>` reinstalls one; `:checkhealth nvim-treesitter` lists broken queries. |
 | A Mason package is broken | `:MasonUninstall <pkg>` then `:MasonInstall <pkg>`. `<leader>cm` opens the Mason UI. |
 | A panel is stuck open | `<leader>qz` closes every tool panel, float and DAP UI at once. |
-| Statusline looks wrong / wrong colours | `:LualineNotices` — lualine reports config problems there and silently falls back, rather than raising an error. `./scripts/verify.sh theme` checks the theme name resolves. |
+| Statusline looks wrong / wrong colours | `:LualineNotices` — lualine reports config problems there and silently falls back, rather than raising an error. `./scripts/verify.sh theme statusline` checks the theme resolves and the separators actually render. |
+| Icons show as boxes (tofu) | Your terminal font is not a Nerd Font. See post-install step 2. Every codepoint used here is in JetBrainsMono and Hack Nerd Font. |
 | Plugin versions drifted | `git checkout nvim/lazy-lock.json` then `:Lazy restore`. |
 | Everything drifted | `./setup.sh --check` shows what differs from the lockfile. |
 
