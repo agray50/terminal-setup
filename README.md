@@ -122,6 +122,7 @@ without the pin every language server, formatter and linter silently upgrades un
 | Treesitter errors on startup | Parser state is corrupt. `:TSInstall! <lang>` reinstalls one; `:checkhealth nvim-treesitter` lists broken queries. |
 | A Mason package is broken | `:MasonUninstall <pkg>` then `:MasonInstall <pkg>`. `<leader>cm` opens the Mason UI. |
 | A panel is stuck open | `<leader>qz` closes every tool panel, float and DAP UI at once. |
+| Statusline looks wrong / wrong colours | `:LualineNotices` — lualine reports config problems there and silently falls back, rather than raising an error. `./scripts/verify.sh theme` checks the theme name resolves. |
 | Plugin versions drifted | `git checkout nvim/lazy-lock.json` then `:Lazy restore`. |
 | Everything drifted | `./setup.sh --check` shows what differs from the lockfile. |
 
@@ -137,9 +138,14 @@ After editing anything under `nvim/`, run:
 It checks that every Lua file parses and is stylua-clean, that `setup.sh` parses under bash 3.2
 (macOS's `/bin/bash`, which the script has to bootstrap under) and is shellcheck-clean, that
 `versions.lock` and the generated `nvim/lua/mason-pin.lua` agree, that the install path never
-resolves a version from the network, and that **every keybinding documented in this README
-actually exists in the config**. That last check is the one that was previously missing, which is
-how the README came to document plugins and keys the config had already moved away from.
+resolves a version from the network, that a clean start produces **no warnings, lualine notices
+or errors**, that lualine's configured theme actually resolves, and that **every keybinding
+documented in this README actually exists in the config**.
+
+The last two exist because of real bugs that passed every other check. lualine reports a bad
+theme name through its own notices buffer and then falls back to `auto` — no Lua error, nothing a
+`pcall` can see — so the statusline was quietly using the wrong theme. The README check is what
+had been missing when it drifted to documenting plugins and keys the config no longer had.
 
 ---
 

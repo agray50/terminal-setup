@@ -126,6 +126,111 @@ check_lockfile() {
 }
 
 # -----------------------------------------------------------------------------
+# Startup notifications
+# -----------------------------------------------------------------------------
+# Several plugins report a misconfiguration via vim.notify and then carry on
+# with a fallback instead of raising a Lua error. lualine does exactly this for
+# an unknown theme name ("Theme `x` not found, falling back to `auto`"), so a
+# wrong value is invisible to a pcall-based check and only shows up as a message
+# the user has to notice. This asserts a clean start produces no notification at
+# WARN level or above.
+check_notifications() {
+    head1 "Startup diagnostics"
+    cat > "$WORK/notify.lua" <<'LUAEOF'
+-- Load everything first. mini.notify REPLACES vim.notify during VeryLazy, so
+-- the capture has to be installed after that or it is simply overwritten.
+vim.cmd("doautocmd User VeryLazy")
+vim.wait(3000)
+vim.cmd.edit(vim.env.REPO_ROOT .. "/nvim/init.lua")
+vim.wait(4000)
+
+local captured = {}
+local original = vim.notify
+vim.notify = function(msg, level, opts)
+	table.insert(captured, { msg = tostring(msg), level = level or vim.log.levels.INFO })
+	return original(msg, level, opts)
+end
+vim.notify_once = vim.notify
+
+pcall(function()
+	require("lualine").refresh()
+end)
+-- lualine reports config problems through a 2s deferred vim.notify, so give it
+-- time to fire rather than racing it.
+vim.wait(3500)
+
+local out = {}
+for _, n in ipairs(captured) do
+	if (n.level or 0) >= vim.log.levels.WARN then
+		table.insert(out, "[notify] " .. n.msg:gsub("\n", " "))
+	end
+end
+
+-- lualine does not report configuration problems as a Lua error, and its
+-- vim.notify only says "run :LualineNotices for details". The detail lives in a
+-- module-local table, so render it the way :LualineNotices does and read the
+-- buffer. This is what makes a bad theme name (or any invalid option) visible:
+-- lualine otherwise falls back to "auto" and carries on silently.
+local ok, notices = pcall(require, "lualine.utils.notices")
+if ok and notices.show_notices then
+	local before = vim.api.nvim_get_current_win()
+	if pcall(notices.show_notices) then
+		local buf = vim.api.nvim_get_current_buf()
+		for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+			-- Skip the markdown headers and blank padding the notice format adds.
+			if line ~= "" and not line:match("^#") then
+				table.insert(out, "[lualine] " .. line)
+			end
+		end
+		pcall(vim.api.nvim_buf_delete, buf, { force = true })
+		pcall(vim.api.nvim_set_current_win, before)
+	end
+end
+
+-- :messages catches anything echoed rather than notified.
+local msgs = vim.api.nvim_exec2("messages", { output = true }).output or ""
+for _, line in ipairs(vim.split(msgs, "\n")) do
+	if line:match("^E%d+:") then
+		table.insert(out, "[messages] " .. line)
+	end
+end
+
+vim.fn.writefile(out, vim.env.NOTIFYFILE)
+LUAEOF
+    if ! NOTIFYFILE="$WORK/notes.txt" REPO_ROOT="$REPO" \
+        nvim --headless -c "luafile $WORK/notify.lua" -c "qa!" >/dev/null 2>&1; then
+        fail "could not capture startup notifications"
+        return
+    fi
+    if [[ -s "$WORK/notes.txt" ]]; then
+        fail "startup produced warnings/errors:"
+        sed 's/^/      /' "$WORK/notes.txt"
+    else
+        pass "no warnings, lualine notices or errors on a clean start"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# lualine theme actually resolves
+# -----------------------------------------------------------------------------
+check_lualine_theme() {
+    head1 "lualine theme"
+    local out
+    out=$(nvim --headless -c 'lua
+        vim.cmd("doautocmd User VeryLazy")
+        vim.wait(2500)
+        local theme = require("lualine.config").get_config().options.theme
+        local resolves = type(theme) ~= "string" or pcall(require, "lualine.themes." .. theme)
+        io.stdout:write((resolves and "OK " or "MISSING ") .. tostring(theme))
+    ' -c "qa!" 2>/dev/null)
+    case "$out" in
+        OK\ *)      pass "theme resolves: ${out#OK }" ;;
+        MISSING\ *) fail "lualine theme ${out#MISSING } does not exist — lualine silently falls back to auto" ;;
+        *)          warn "could not determine lualine theme" ;;
+    esac
+}
+
+# -----------------------------------------------------------------------------
 # Keymaps: every key documented in the README must exist in the live config
 # -----------------------------------------------------------------------------
 check_keymaps() {
@@ -202,9 +307,12 @@ case "$ONLY" in
     lua)      check_lua ;;
     shell)    check_shell ;;
     lock)     check_lockfile ;;
+    notify)   check_notifications ;;
+    theme)    check_lualine_theme ;;
     keymaps)  check_keymaps ;;
-    all)      check_lua; check_shell; check_lockfile; check_keymaps ;;
-    *)        echo "Usage: $0 [all|lua|shell|lock|keymaps]"; exit 2 ;;
+    all)      check_lua; check_shell; check_lockfile; check_lualine_theme
+              check_notifications; check_keymaps ;;
+    *)        echo "Usage: $0 [all|lua|shell|lock|theme|notify|keymaps]"; exit 2 ;;
 esac
 
 echo ""

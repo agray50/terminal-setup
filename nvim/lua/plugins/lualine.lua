@@ -42,7 +42,14 @@ return {
 
 		return {
 			options = {
-				theme = "catppuccin",
+				-- NOT "catppuccin" — catppuccin ships no theme by that name, only
+				-- catppuccin-{nvim,mocha,latte,macchiato,frappe}. lualine only
+				-- *warns* on an unknown theme and silently falls back to "auto",
+				-- so a wrong name here is invisible unless you read the message.
+				-- "catppuccin-nvim" resolves the active flavour at runtime, so it
+				-- follows whatever colorscheme is set in plugins/catppuccin.lua
+				-- rather than hard-coding mocha in a second place.
+				theme = "catppuccin-nvim",
 				globalstatus = true,
 				component_separators = { left = "", right = "" },
 				section_separators = { left = "", right = "" },
