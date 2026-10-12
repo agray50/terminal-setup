@@ -63,6 +63,22 @@ return {
 						workspace,
 					},
 					root_dir = root_dir,
+					-- Loading the java-debug/java-test bundles above makes the
+					-- adapter *available*; it does not create any debug
+					-- configurations. Those come from jdtls resolving the
+					-- project's main classes, which needs a live client — so
+					-- it has to happen on attach rather than at start. Without
+					-- this, `dap.adapters.java` exists but
+					-- `dap.configurations.java` stays empty and every debug key
+					-- silently does nothing in a Java buffer.
+					on_attach = function()
+						local ok, jdtls_dap = pcall(require, "jdtls.dap")
+						if not ok then
+							return
+						end
+						require("jdtls").setup_dap({ hotcodereplace = "auto" })
+						jdtls_dap.setup_dap_main_class_configs()
+					end,
 					init_options = {
 						bundles = bundles,
 						-- Tells jdtls it can rely on the client (blink) to

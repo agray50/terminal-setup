@@ -133,6 +133,9 @@ without the pin every language server, formatter and linter silently upgrades un
 | Plugin versions drifted | `git checkout nvim/lazy-lock.json` then `:Lazy restore`. |
 | Everything drifted | `./setup.sh --check` shows what differs from the lockfile. |
 | `command not found: goenv` (or pyenv) on shell start | A legacy un-delimited block from an older version of this script. `./setup.sh` migrates it; it backs `~/.zshrc` up first. |
+| `command not found: _pyenv_lazy_load` repeating forever, or `node`/`python3`/`go` hanging | An old lazy-load stub that delegated its own `unset -f` to a helper and recursed when that helper was absent. `./setup.sh` rewrites all three blocks; `./scripts/verify.sh shellinit` confirms it. |
+| A language server works in nvim but a tool picks the wrong Python/Node/Go | The interpreter directory is not on `PATH` — it used to be reachable only from a shell function, so anything not sourcing `~/.zshrc` got the system version. `./setup.sh` exports it eagerly now. |
+| Debug keys do nothing in a Java file | jdtls has to resolve the project's main classes before any configuration exists. Wait for the server to finish indexing, then `<leader>dc`. `./scripts/verify.sh dap` checks the wiring. |
 | `unknown style 'zdiff3' given for 'merge.conflictstyle'` | Your git predates 2.35. `./setup.sh` regenerates `git/gitconfig.local` for the local git version — run it on that machine. |
 
 ### Verifying a change
@@ -140,9 +143,15 @@ without the pin every language server, formatter and linter silently upgrades un
 After editing anything under `nvim/`, run:
 
 ```bash
-./scripts/verify.sh            # all checks
+./scripts/verify.sh            # the fast checks (a few seconds)
 ./scripts/verify.sh keymaps    # just README/config keymap consistency
+./scripts/verify.sh languages  # every language: LSP, formatter, linter
+./scripts/verify.sh dap        # every language: debug adapter + configurations
 ```
+
+`languages` and `dap` are kept out of the default run because they stand up a real fixture
+project and wait for servers — jdtls alone takes most of a minute from cold. Run them after
+touching `mason.lua`, `lsp-config.lua`, `conform.lua`, `nvim-lint.lua`, `dap.lua` or `jdtls.lua`.
 
 It checks that every Lua file parses and is stylua-clean, that `setup.sh` parses under bash 3.2
 (macOS's `/bin/bash`, which the script has to bootstrap under) and is shellcheck-clean, that
@@ -150,6 +159,18 @@ It checks that every Lua file parses and is stylua-clean, that `setup.sh` parses
 resolves a version from the network, that a clean start produces **no warnings, lualine notices
 or errors**, that lualine's configured theme actually resolves, and that **every keybinding
 documented in this README actually exists in the config**.
+
+`languages` builds a fixture with real root markers (`package.json`, `go.mod`, `Cargo.toml`,
+`pom.xml`, `Chart.yaml`, a git repo) — most servers refuse to start without one, so a bare
+scratch file in `/tmp` proves nothing — then asserts, for 19 languages, that the server attaches,
+that conform resolves the intended formatter and its binary exists, and that nvim-lint has a
+linter that is actually executable. `dap` asserts that each language has both a registered
+adapter *and* at least one debug configuration, which is the pair that makes a debug key do
+something.
+
+`shellinit` reads the nvm/pyenv/goenv blocks straight out of `setup.sh` and asserts that no stub
+can recurse when its helpers are missing, and that each interpreter directory reaches `PATH`
+eagerly rather than only from inside a shell function.
 
 The last two exist because of real bugs that passed every other check. lualine reports a bad
 theme name through its own notices buffer and then falls back to `auto` — no Lua error, nothing a

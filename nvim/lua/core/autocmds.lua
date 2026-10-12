@@ -176,9 +176,6 @@ vim.api.nvim_create_autocmd("BufReadPre", {
 	end,
 })
 
--- Helm chart templates are Go templates, not YAML. Without this they are parsed
--- as YAML and every {{ }} block becomes a syntax error — which is one of the
--- "random errors" this config used to produce on a Helm repo.
 -- Filetype registrations.
 --
 -- Several language servers declare compound filetypes that Neovim has no
@@ -195,6 +192,12 @@ vim.filetype.add({
 		mdx = "markdown.mdx",
 		gql = "graphql",
 		graphql = "graphql",
+		-- gopls declares `gotmpl` and the parser is in treesitter's wanted list,
+		-- but no extension mapped to it — so standalone Go templates fell back
+		-- to no filetype at all, with neither highlighting nor a server.
+		tmpl = "gotmpl",
+		gotmpl = "gotmpl",
+		gohtml = "gotmpl",
 	},
 	filename = {
 		-- docker-compose: the compose language server declares this filetype and

@@ -17,10 +17,25 @@ return {
 				"jay-babu/mason-nvim-dap.nvim",
 				dependencies = { "mason-org/mason.nvim" },
 				opts = {
-					-- An empty handlers table enables mason-nvim-dap's default
-					-- handler for every source, which is what registers the
-					-- adapters with nvim-dap.
-					handlers = {},
+					handlers = {
+						-- The positional entry is the default handler, applied
+						-- to every source without a named handler below. It is
+						-- what registers each adapter with nvim-dap.
+						function(config)
+							require("mason-nvim-dap").default_setup(config)
+						end,
+						-- python and delve are owned by nvim-dap-python and
+						-- nvim-dap-go, which register their own adapters *and*
+						-- test-aware configurations. Letting the default
+						-- handler run for them too registered a second,
+						-- overlapping set: the Go picker offered 11 entries
+						-- including both "Debug test" and "Delve: Debug test"
+						-- for the same action, and Python showed "Python:
+						-- Launch file" next to a bare "file". No-ops here, so
+						-- each language has exactly one set of configurations.
+						python = function() end,
+						delve = function() end,
+					},
 					-- Install/configure these on first DAP use rather than via
 					-- mason-tool-installer, which would otherwise force this
 					-- whole plugin (and nvim-dap with it) to load on every
@@ -53,6 +68,21 @@ return {
 					end
 					-- Default to pytest for test discovery.
 					require("dap-python").test_runner = "pytest"
+					-- nvim-dap-python names its configurations "file",
+					-- "file:args", "attach" and "file:doctest", which read as
+					-- nothing in a picker sitting next to every other
+					-- language's full sentences. Relabel in place rather than
+					-- replacing them, so the adapter wiring and justMyCode
+					-- defaults stay nvim-dap-python's.
+					local labels = {
+						["file"] = "Python: Launch file",
+						["file:args"] = "Python: Launch file (with arguments)",
+						["attach"] = "Python: Attach to running process",
+						["file:doctest"] = "Python: Run doctests in file",
+					}
+					for _, cfg in ipairs(require("dap").configurations.python or {}) do
+						cfg.name = labels[cfg.name] or cfg.name
+					end
 				end,
 			},
 			{
