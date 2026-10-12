@@ -434,6 +434,111 @@ LUAEOF
     fi
 }
 
+# -----------------------------------------------------------------------------
+# Shell init blocks (nvm / pyenv / goenv)
+# -----------------------------------------------------------------------------
+# These blocks caused the worst bug in this repo's history: each stub delegated
+# its own `unset -f` to a shared `_<tool>_lazy_load` helper, so in any shell
+# where that helper did not survive -- notably tools that snapshot an rc file
+# and drop `_`-prefixed functions, treating them as completion helpers -- the
+# stub called a missing loader, never unset itself, and then called itself.
+# `node`, `python3`, `go` and eight other everyday commands recursed until zsh
+# ran out of stack.
+#
+# Two properties are asserted, both read straight out of setup.sh so this tests
+# what a *fresh* machine gets rather than whatever is in the current ~/.zshrc:
+#
+#   1. No stub can recurse, even with every helper it might rely on deleted and
+#      with the real binary absent from PATH.
+#   2. The interpreter directories land on PATH eagerly. Behind a shell function
+#      they were invisible to every process that does not source an rc file --
+#      nvim's language servers and debug adapters among them, which is why
+#      basedpyright and debugpy were silently running against the system Python
+#      rather than the pyenv-selected one.
+check_shell_init() {
+    head1 "Shell init blocks"
+
+    if ! command -v zsh >/dev/null 2>&1; then
+        warn "zsh not found; skipping shell init checks"
+        return
+    fi
+    mkdir -p "$WORK/emptyhome"
+
+    local tool block
+    for tool in nvm pyenv goenv; do
+        block="$WORK/$tool.zsh"
+        # Pull the heredoc body for this tool's add_block call out of setup.sh.
+        awk -v t="$tool" '
+            $0 == "    add_block \"" t "\" \"${HOME}/.zshrc\" <<'\''BLOCK_EOF'\''" { inblk = 1; next }
+            inblk && $0 == "BLOCK_EOF" { exit }
+            inblk { print }
+        ' "$REPO/setup.sh" > "$block"
+
+        if [[ ! -s "$block" ]]; then
+            fail "$tool: could not extract its block from setup.sh"
+            continue
+        fi
+
+        # Every public stub the block defines, e.g. "pyenv() {" -> pyenv.
+        local -a stubs
+        # shellcheck disable=SC2207
+        stubs=($(grep -oE '^[a-z][a-z0-9_]*\(\)' "$block" | tr -d '()'))
+        if [[ ${#stubs[@]} -eq 0 ]]; then
+            fail "$tool: block defines no stub functions"
+            continue
+        fi
+
+        local fn recursed=0 out
+        for fn in "${stubs[@]}"; do
+            # Hostile conditions: helper functions deleted, real binary absent,
+            # and the tool root pointed somewhere empty. FUNCNEST turns runaway
+            # recursion into a single identifiable error instead of a hang.
+            out=$(FUNCNEST=40 HOME="$WORK/emptyhome" zsh -c "
+                source '$block' 2>/dev/null
+                for f in \${(k)functions}; do [[ \$f == _* ]] && unset -f \$f; done
+                PATH=/usr/bin:/bin
+                $fn --version
+            " 2>&1)
+            if grep -q 'maximum nested function level' <<<"$out"; then
+                fail "$tool: \`$fn\` recurses when its helpers are missing"
+                recursed=1
+            fi
+        done
+        [[ $recursed -eq 0 ]] && pass "$tool: ${#stubs[@]} stub(s) terminate without recursion"
+    done
+
+    # Property 2 -- the directories a non-shell consumer needs must be exported,
+    # not hidden behind a function call. Checked only where the tool is actually
+    # installed, so this stays meaningful on a machine that skipped one.
+    local -a want=()
+    [[ -d "$HOME/.pyenv/shims" ]] && want+=("pyenv:$HOME/.pyenv/shims")
+    [[ -d "$HOME/.goenv/shims" ]] && want+=("goenv:$HOME/.goenv/shims")
+    [[ -d "$HOME/.nvm/versions/node" ]] && want+=("nvm:/.nvm/versions/node/")
+
+    if [[ ${#want[@]} -eq 0 ]]; then
+        warn "no version managers installed; skipping PATH check"
+        return
+    fi
+
+    # Source all three blocks in one shell, exactly as .zshrc does.
+    local newpath
+    newpath=$(zsh -c "
+        PATH=/usr/bin:/bin
+        source '$WORK/nvm.zsh'; source '$WORK/pyenv.zsh'; source '$WORK/goenv.zsh'
+        print -r -- \$PATH
+    " 2>/dev/null)
+
+    local entry name dir
+    for entry in "${want[@]}"; do
+        name="${entry%%:*}"; dir="${entry#*:}"
+        if [[ ":$newpath:" == *"$dir"* ]]; then
+            pass "$name: interpreter directory exported to PATH eagerly"
+        else
+            fail "$name: $dir never reaches PATH — non-shell consumers get the system version"
+        fi
+    done
+}
+
 case "$ONLY" in
     lua)      check_lua ;;
     shell)    check_shell ;;
@@ -443,10 +548,11 @@ case "$ONLY" in
     statusline) check_statusline ;;
     gitcompat)  check_gitconfig_compat ;;
     keymaps)  check_keymaps ;;
-    all)      check_lua; check_shell; check_lockfile; check_gitconfig_compat
+    shellinit) check_shell_init ;;
+    all)      check_lua; check_shell; check_shell_init; check_lockfile; check_gitconfig_compat
               check_lualine_theme; check_statusline; check_notifications
               check_keymaps ;;
-    *)        echo "Usage: $0 [all|lua|shell|lock|gitcompat|theme|statusline|notify|keymaps]"; exit 2 ;;
+    *)        echo "Usage: $0 [all|lua|shell|shellinit|lock|gitcompat|theme|statusline|notify|keymaps]"; exit 2 ;;
 esac
 
 echo ""

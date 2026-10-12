@@ -924,22 +924,45 @@ install_nvm() {
         success "nvm ${tag} installed"
     fi
 
-    # nvm's installer may have already written its init block to .zshrc (when $SHELL=zsh);
-    # check for the sourced script rather than our marker to avoid duplicates.
-    # Sourcing nvm.sh is real shell-startup cost, so defer it behind a lazy-loading
-    # stub that only runs on first actual use of nvm/node/npm/npx.
+    # nvm's own installer appends an eager init block to .zshrc when $SHELL=zsh;
+    # migrate_legacy_zshrc removes it, since it both costs ~200ms per shell and
+    # fights the managed block below. The block itself splits the difference:
+    # PATH is set eagerly (cheap, and visible to non-shell consumers), while the
+    # nvm function is deferred to first use.
     add_block "nvm" "${HOME}/.zshrc" <<'BLOCK_EOF'
-# nvm (lazy-loaded on first use)
+# nvm (default Node on PATH eagerly; nvm itself lazy)
 export NVM_DIR="$HOME/.nvm"
-_nvm_lazy_load() {
-    unset -f nvm node npm npx _nvm_lazy_load
-    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-    [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+# Sourcing nvm.sh costs ~200ms on every shell start, and for anything that is
+# not an interactive shell all it achieves is putting the selected Node on PATH.
+# Resolve that directory here instead — alias file reads and a glob, no forks —
+# so processes that never source an rc file (nvim's language servers, debug
+# adapters, build scripts) see the same node this shell does. Previously they
+# did not: node was reachable only by calling a shell function.
+if [[ -d $NVM_DIR/versions/node ]]; then
+    # Follow alias indirection: default -> lts/jod -> 22.22.0. Bounded, because
+    # a corrupt alias file could otherwise point at itself.
+    _nvm_ref=default
+    for _nvm_i in 1 2 3 4 5; do
+        [[ -r $NVM_DIR/alias/$_nvm_ref ]] || break
+        read -r _nvm_ref < "$NVM_DIR/alias/$_nvm_ref"
+    done
+    # Numeric glob sort (the `n` qualifier) orders v24.6.0 before v24.14.1.
+    _nvm_bin=($NVM_DIR/versions/node/v${_nvm_ref#v}*/bin(/Nn))
+    (( $#_nvm_bin )) || _nvm_bin=($NVM_DIR/versions/node/v*/bin(/Nn))
+    (( $#_nvm_bin )) && export PATH="${_nvm_bin[-1]}:$PATH"
+    unset _nvm_ref _nvm_bin _nvm_i
+fi
+# `nvm` itself still needs the full script, so load it on first use. The stub
+# unsets itself *before* sourcing anything: if the source fails, the call falls
+# through to PATH rather than re-entering this function forever. An earlier
+# version delegated the unset to a shared `_nvm_lazy_load` helper, which made
+# every stub a fork bomb in any shell where that helper did not survive.
+nvm() {
+    unset -f nvm 2>/dev/null
+    [[ -s $NVM_DIR/nvm.sh ]] && source "$NVM_DIR/nvm.sh"
+    [[ -s $NVM_DIR/bash_completion ]] && source "$NVM_DIR/bash_completion"
+    nvm "$@"
 }
-nvm()  { _nvm_lazy_load; nvm "$@"; }
-node() { _nvm_lazy_load; node "$@"; }
-npm()  { _nvm_lazy_load; npm "$@"; }
-npx()  { _nvm_lazy_load; npx "$@"; }
 BLOCK_EOF
 }
 
@@ -949,21 +972,30 @@ install_pyenv() {
     # which always fetches master and is one of the ways this setup used to drift.
     clone_at_tag "https://github.com/pyenv/pyenv.git" "${HOME}/.pyenv" "$(pin PYENV_VERSION)" "pyenv"
 
-    # `pyenv init -` forks pyenv and evals its output on every shell startup;
-    # defer that behind a lazy-loading stub that runs on first actual use.
+    # PATH eagerly, `pyenv init -` lazily — see the block's own comments for why
+    # the shims have to be on PATH rather than behind a shell function.
     add_block "pyenv" "${HOME}/.zshrc" <<'BLOCK_EOF'
-# pyenv (lazy-loaded on first use)
+# pyenv (shims on PATH eagerly; shell integration lazy)
 export PYENV_ROOT="$HOME/.pyenv"
+# `pyenv init -` forks pyenv and evals its output on every shell start. For
+# anything that is not an interactive shell, all that output does is prepend
+# these two directories — so prepend them directly. This also fixes a real
+# correctness bug: with the shims reachable only through a shell function,
+# processes spawned without an rc file (nvim's language servers, debugpy, build
+# tooling) silently got the system Python instead of the pyenv-selected one.
 [[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
-_pyenv_lazy_load() {
-    unset -f pyenv python python3 pip pip3 _pyenv_lazy_load
+[[ -d $PYENV_ROOT/shims ]] && export PATH="$PYENV_ROOT/shims:$PATH"
+# `pyenv shell` is the only subcommand that needs the shell function, so defer
+# the full init to first use of `pyenv` itself. The stub unsets itself *before*
+# running init: if init fails or pyenv is missing, the call falls through to
+# PATH rather than re-entering this function forever. An earlier version put the
+# unset in a shared `_pyenv_lazy_load` helper, which turned python, python3, pip
+# and pip3 into fork bombs in any shell where that helper did not survive.
+pyenv() {
+    unset -f pyenv 2>/dev/null
     eval "$(command pyenv init -)"
+    pyenv "$@"
 }
-pyenv()   { _pyenv_lazy_load; pyenv "$@"; }
-python()  { _pyenv_lazy_load; python "$@"; }
-python3() { _pyenv_lazy_load; python3 "$@"; }
-pip()     { _pyenv_lazy_load; pip "$@"; }
-pip3()    { _pyenv_lazy_load; pip3 "$@"; }
 BLOCK_EOF
 
     # pyenv builds Python from source — surface the required packages per distro
@@ -981,19 +1013,21 @@ install_goenv() {
     info "=== goenv ==="
     clone_at_tag "https://github.com/go-nv/goenv.git" "${HOME}/.goenv" "$(pin GOENV_VERSION)" "goenv"
 
-    # `goenv init -` forks goenv and evals its output on every shell startup;
-    # defer that behind a lazy-loading stub that runs on first actual use.
+    # PATH eagerly, `goenv init -` lazily — same reasoning as pyenv above.
     add_block "goenv" "${HOME}/.zshrc" <<'BLOCK_EOF'
-# goenv (lazy-loaded on first use)
+# goenv (shims on PATH eagerly; shell integration lazy)
 export GOENV_ROOT="$HOME/.goenv"
-export PATH="$GOENV_ROOT/bin:$PATH"
 export GOENV_PATH_ORDER=front
-_goenv_lazy_load() {
-    unset -f goenv go _goenv_lazy_load
+# Same reasoning as pyenv above: prepend the directories `goenv init -` would
+# have exported, so `go` resolves to the goenv-selected toolchain for every
+# consumer rather than only inside a shell function.
+[[ -d $GOENV_ROOT/bin ]] && export PATH="$GOENV_ROOT/bin:$PATH"
+[[ -d $GOENV_ROOT/shims ]] && export PATH="$GOENV_ROOT/shims:$PATH"
+goenv() {
+    unset -f goenv 2>/dev/null
     eval "$(command goenv init -)"
+    goenv "$@"
 }
-goenv() { _goenv_lazy_load; goenv "$@"; }
-go()    { _goenv_lazy_load; go "$@"; }
 BLOCK_EOF
 
     # goenv downloads pre-built Go binaries but needs gcc/make for cgo-based tooling
@@ -1145,6 +1179,12 @@ install_tfenv() {
 #   2. Any block whose header already existed was skipped forever, so later
 #      improvements to the aliases/functions never reached this machine.
 #
+#   3. nvm's *own* installer appends an un-delimited, header-less trio that
+#      sources nvm.sh on every shell start. It survived every previous pass
+#      because it has no header to match, so the managed nvm block was loading
+#      on top of an already-eager nvm -- paying the ~200ms this setup exists to
+#      avoid. It is matched by its exact three lines instead.
+#
 # Blocks are removed from their header to the following blank line. Every block
 # written by this script is a single paragraph, so that boundary is exact. The
 # two multi-paragraph blocks (aliases, functions) are reported rather than
@@ -1178,8 +1218,11 @@ migrate_legacy_zshrc() {
     done
     local sdk_count
     sdk_count=$(grep -c 'sdkman-init.sh' "$zshrc" 2>/dev/null || echo 0)
+    # The header-less nvm installer block, identified by its own trailing comment.
+    local nvm_eager
+    nvm_eager=$(grep -c '^\[ -s "\$NVM_DIR/nvm.sh" \]' "$zshrc" 2>/dev/null || echo 0)
 
-    if [[ $found -eq 0 && "$sdk_count" -le 1 ]]; then
+    if [[ $found -eq 0 && "$sdk_count" -le 1 && "$nvm_eager" -eq 0 ]]; then
         success "no legacy blocks to migrate"
         return 0
     fi
@@ -1213,6 +1256,13 @@ migrate_legacy_zshrc() {
             next
         }
         ($0 in hdr) { skipping = 1; removed++; next }
+
+        # The nvm installer writes these three lines with no header. Matched
+        # exactly so nothing else can be caught by them; the managed nvm block
+        # re-exports NVM_DIR to the same value, so dropping it loses nothing.
+        $0 == "export NVM_DIR=\"$HOME/.nvm\"" { removed++; next }
+        /^\[ -s "\$NVM_DIR\/nvm\.sh" \]/ { removed++; next }
+        /^\[ -s "\$NVM_DIR\/bash_completion" \]/ { removed++; next }
         { print }
         END { if (removed) printf("REMOVED %d\n", removed) > "/dev/stderr" }
     ' "$zshrc" > "$tmp"
