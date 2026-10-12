@@ -231,7 +231,11 @@ return {
 				INFO = { duration = 3000 },
 			})
 
-			vim.keymap.set("n", "<leader>un", function()
+			-- <leader>uN, not <leader>un: the <leader>u group is UI *toggles*
+			-- and <leader>un is the line-number toggle in core/keymaps.lua.
+			-- This used to overwrite it at VeryLazy, so the documented toggle
+			-- had no key at all.
+			vim.keymap.set("n", "<leader>uN", function()
 				require("mini.notify").show_history()
 			end, { desc = "󰂞 Show notification history" })
 

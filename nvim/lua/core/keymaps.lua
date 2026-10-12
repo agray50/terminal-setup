@@ -18,14 +18,12 @@
 local map = vim.keymap.set
 
 -- ---------------------------------------------------------------------------
--- Window and pane navigation (shared with vim-tmux-navigator)
+-- Window and pane navigation
 -- ---------------------------------------------------------------------------
--- The plugin remaps these when loaded; these are the fallbacks for when nvim
--- is running outside tmux.
-map("n", "<C-h>", "<C-w>h", { desc = "Window left" })
-map("n", "<C-j>", "<C-w>j", { desc = "Window below" })
-map("n", "<C-k>", "<C-w>k", { desc = "Window above" })
-map("n", "<C-l>", "<C-w>l", { desc = "Window right" })
+-- <C-h/j/k/l> belong to vim-tmux-navigator (plugins/nvim-tmux-navigation.lua).
+-- There used to be <C-w>h-style "fallbacks for when nvim is outside tmux"
+-- here; they could never fire, because lazy registers its key stubs after this
+-- file runs, and the plugin falls back to wincmd outside tmux by itself.
 
 -- Resize with arrows — repeatable without re-reaching for the leader.
 map("n", "<C-Up>", "<cmd>resize +2<cr>", { desc = "Taller window" })

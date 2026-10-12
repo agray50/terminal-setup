@@ -25,6 +25,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_BIN="${HOME}/.local/bin"
 BACKUP_DIR="${HOME}/.config-backups/$(date +%Y%m%d-%H%M%S)"
+BACKUP_WARN_AT=25
 LOCKFILE="${SCRIPT_DIR}/versions.lock"
 MANUAL_STEPS=()
 
@@ -268,6 +269,18 @@ add_block() {
     } >> "$file"
 }
 
+# Print only the lines of a file that are OUTSIDE "# >>> terminal-setup:"
+# regions. Detection of legacy blocks has to run against this rather than the
+# whole file: several of the legacy headers we look for are byte-identical to
+# the first content line of the blocks this script itself writes.
+unmanaged_region() {
+    awk '
+        /^# >>> terminal-setup:/ { managed = 1; next }
+        /^# <<< terminal-setup:/ { managed = 0; next }
+        !managed { print }
+    ' "$1"
+}
+
 backup_if_exists() {
     [[ -e "$1" ]] || return 0
     if $DRY_RUN; then
@@ -277,6 +290,25 @@ backup_if_exists() {
     mkdir -p "$BACKUP_DIR"
     cp -r "$1" "$BACKUP_DIR/$(basename "$1")"
     info "Backed up $1"
+}
+
+# Backups accumulate one directory per changed file per run. That was a real
+# problem while migrate_legacy_zshrc was rewriting ~/.zshrc on every run (53
+# directories had built up, 38 of them byte-identical); with that fixed, a new
+# directory appears only when something genuinely changed.
+#
+# So this warns rather than deletes. An installer should not quietly discard
+# the user's own config history, and the *oldest* snapshot — the pre-setup
+# original — is the one most worth keeping, which is exactly what a naive
+# "keep the newest N" would throw away first.
+warn_stale_backups() {
+    local root="${HOME}/.config-backups" count
+    [[ -d "$root" ]] || return 0
+    count=$(find "$root" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+    if [[ "$count" -gt "$BACKUP_WARN_AT" ]]; then
+        warn "${count} config snapshots in ${root} — delete the ones you no longer need."
+    fi
+    return 0
 }
 
 # Resolve latest release tag from a GitHub repo (e.g. "v1.2.3" or "14.1.1").
@@ -1213,20 +1245,37 @@ migrate_legacy_zshrc() {
         "# Custom keybindings"
     )
 
+    # Detection runs against the un-managed remainder only. Three of the
+    # headers above -- "# SDKMAN", "# tmux auto-attach", "# Custom keybindings"
+    # -- are byte-identical to the first content line of blocks add_block
+    # writes, so grepping the whole file matched this script's own output and
+    # pinned `found` at 1 forever. The awk below was always managed-aware; the
+    # detection was not. The cost was a backup directory, a full awk rewrite
+    # and two perl passes over ~/.zshrc on every single run, plus a [MANUAL]
+    # step telling the user to hand-delete the installer's own blocks. 53
+    # backup directories had accumulated here before this was spotted.
+    local unmanaged
+    unmanaged=$(mktemp)
+    unmanaged_region "$zshrc" > "$unmanaged"
+
     local found=0 h
     for h in "${legacy_headers[@]}"; do
-        if grep -qxF "$h" "$zshrc" 2>/dev/null; then
+        if grep -qxF "$h" "$unmanaged"; then
             found=1
             break
         fi
     done
-    local sdk_count
-    sdk_count=$(grep -c 'sdkman-init.sh' "$zshrc" 2>/dev/null || echo 0)
-    # The header-less nvm installer block, identified by its own trailing comment.
-    local nvm_eager
-    nvm_eager=$(grep -c '^\[ -s "\$NVM_DIR/nvm.sh" \]' "$zshrc" 2>/dev/null || echo 0)
 
-    if [[ $found -eq 0 && "$sdk_count" -le 1 && "$nvm_eager" -eq 0 ]]; then
+    # `grep -c` prints "0" AND exits 1 when nothing matches, so the previous
+    # `|| echo 0` appended a *second* line: the value became "0\n0" and the
+    # numeric test below threw a syntax error rather than comparing. `|| true`
+    # keeps grep's own "0" and swallows only the exit status.
+    local sdk_count nvm_eager
+    sdk_count=$(grep -cF 'sdkman-init.sh' "$unmanaged" || true)
+    nvm_eager=$(grep -c '^\[ -s "\$NVM_DIR/nvm.sh" \]' "$unmanaged" || true)
+    rm -f "$unmanaged"
+
+    if [[ "$sdk_count" -le 1 && "$nvm_eager" -eq 0 && $found -eq 0 ]]; then
         success "no legacy blocks to migrate"
         return 0
     fi
@@ -1259,16 +1308,15 @@ migrate_legacy_zshrc() {
             if ($0 == "") { skipping = 0 }   # blank line ends the legacy block
             next
         }
-        ($0 in hdr) { skipping = 1; removed++; next }
+        ($0 in hdr) { skipping = 1; next }
 
         # The nvm installer writes these three lines with no header. Matched
         # exactly so nothing else can be caught by them; the managed nvm block
         # re-exports NVM_DIR to the same value, so dropping it loses nothing.
-        $0 == "export NVM_DIR=\"$HOME/.nvm\"" { removed++; next }
-        /^\[ -s "\$NVM_DIR\/nvm\.sh" \]/ { removed++; next }
-        /^\[ -s "\$NVM_DIR\/bash_completion" \]/ { removed++; next }
+        $0 == "export NVM_DIR=\"$HOME/.nvm\"" { next }
+        /^\[ -s "\$NVM_DIR\/nvm\.sh" \]/ { next }
+        /^\[ -s "\$NVM_DIR\/bash_completion" \]/ { next }
         { print }
-        END { if (removed) printf("REMOVED %d\n", removed) > "/dev/stderr" }
     ' "$zshrc" > "$tmp"
     mv "$tmp" "$zshrc"
     rm -f "$hdr_file"
@@ -1287,10 +1335,15 @@ migrate_legacy_zshrc() {
 
     success "legacy un-delimited blocks removed (backed up to $BACKUP_DIR)"
 
-    # Report, don't delete, the multi-paragraph ones.
-    local leftover=""
-    grep -qxF "# Custom aliases" "$zshrc" 2>/dev/null && leftover="${leftover} '# Custom aliases'"
-    grep -qxF "# Custom shell functions" "$zshrc" 2>/dev/null && leftover="${leftover} '# Custom shell functions'"
+    # Report, don't delete, the multi-paragraph ones -- again against the
+    # un-managed remainder, since "# Custom aliases" and "# Custom shell
+    # functions" are also the first lines of the blocks written above.
+    local leftover="" rest
+    rest=$(mktemp)
+    unmanaged_region "$zshrc" > "$rest"
+    grep -qxF "# Custom aliases" "$rest" && leftover="${leftover} '# Custom aliases'"
+    grep -qxF "# Custom shell functions" "$rest" && leftover="${leftover} '# Custom shell functions'"
+    rm -f "$rest"
     if [[ -n "$leftover" ]]; then
         manual "Old${leftover} block(s) remain in ~/.zshrc. The managed versions are appended after them and take precedence, so this is cosmetic — delete the old ones by hand when convenient."
     fi
@@ -2100,6 +2153,7 @@ BLOCK_EOF
     # Must run before any managed block is written, so the legacy removal can
     # never touch freshly generated content.
     migrate_legacy_zshrc
+    warn_stale_backups
 
     echo ""
     info "--- Installing tools ---"
