@@ -282,25 +282,29 @@ backup_if_exists() {
 # Resolve latest release tag from a GitHub repo (e.g. "v1.2.3" or "14.1.1").
 # ONLY called by --update. The install path never resolves versions.
 github_latest_tag() {
-    curl -fsLI "https://github.com/$1/releases/latest" -o /dev/null -w '%{url_effective}' 2>/dev/null \
+    curl -fsLI --retry 2 --retry-delay 1 --retry-connrefused \
+        "https://github.com/$1/releases/latest" -o /dev/null -w '%{url_effective}' 2>/dev/null \
         | sed 's|.*/tag/||'
 }
 
 # Latest tag (not release) — for repos that tag but never publish releases.
 github_latest_tag_only() {
-    curl -fsL "https://api.github.com/repos/$1/tags?per_page=1" 2>/dev/null \
+    curl -fsL --retry 2 --retry-delay 1 --retry-connrefused \
+        "https://api.github.com/repos/$1/tags?per_page=1" 2>/dev/null \
         | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
 }
 
 # Latest commit SHA on the default branch — for repos with no tags at all.
 github_latest_commit() {
-    curl -fsL "https://api.github.com/repos/$1/commits?per_page=1" 2>/dev/null \
+    curl -fsL --retry 2 --retry-delay 1 --retry-connrefused \
+        "https://api.github.com/repos/$1/commits?per_page=1" 2>/dev/null \
         | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
 }
 
 # Latest mason-registry snapshot tag.
 mason_latest_registry() {
-    curl -fsL "https://api.github.com/repos/mason-org/mason-registry/releases?per_page=1" 2>/dev/null \
+    curl -fsL --retry 2 --retry-delay 1 --retry-connrefused \
+        "https://api.github.com/repos/mason-org/mason-registry/releases?per_page=1" 2>/dev/null \
         | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
 }
 
@@ -1808,7 +1812,8 @@ resolve_latest_in_series() {
     # Exact prefix match via `case`, NOT grep: the constraint contains a literal
     # "." which grep would treat as "any character", so "2." also matched the
     # ancient date-based tag "v20161215".
-    curl -fsL "https://api.github.com/repos/${repo}/tags?per_page=100" 2>/dev/null \
+    curl -fsL --retry 2 --retry-delay 1 --retry-connrefused \
+        "https://api.github.com/repos/${repo}/tags?per_page=100" 2>/dev/null \
         | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
         | while IFS= read -r tag; do
             case "${tag#v}" in
@@ -1820,17 +1825,24 @@ resolve_latest_in_series() {
         | tail -1
 }
 
+# Every resolver above is a `curl | sed` pipeline and this script runs under
+# `set -euo pipefail`, so `latest=$(resolve_latest ...)` propagated curl's exit
+# status: one transient failure part-way through --update (curl 56, "failure
+# receiving network data", observed against GitHub mid-run) aborted the entire
+# run with a bare exit code, no message, and versions.lock untouched. Swallow
+# the status and return an empty string instead — do_update already treats ""
+# as unresolved, keeps the existing pin, warns, and counts it.
 resolve_latest() {
-    local spec="$1" kind repo
+    local spec="$1" kind repo out=""
     kind="${spec%%:*}"
     repo="${spec#*:}"
     case "$kind" in
-        release) github_latest_tag "$repo" ;;
-        tag)     github_latest_tag_only "$repo" ;;
-        commit)  github_latest_commit "$repo" ;;
-        mason)   mason_latest_registry ;;
-        *)       echo "" ;;
+        release) out=$(github_latest_tag "$repo" || true) ;;
+        tag)     out=$(github_latest_tag_only "$repo" || true) ;;
+        commit)  out=$(github_latest_commit "$repo" || true) ;;
+        mason)   out=$(mason_latest_registry || true) ;;
     esac
+    printf '%s' "$out"
 }
 
 do_update() {
@@ -1875,7 +1887,7 @@ do_update() {
         if [[ -n "$constraint" && -n "$latest" ]]; then
             if [[ "${latest#v}" != "${constraint}"* ]]; then
                 local series
-                series=$(resolve_latest_in_series "$spec" "$constraint")
+                series=$(resolve_latest_in_series "$spec" "$constraint" || true)
                 if [[ -n "$series" ]]; then
                     info "$key: newest is ${latest}, but constrained to ${constraint}x — using ${series}"
                     latest="$series"
