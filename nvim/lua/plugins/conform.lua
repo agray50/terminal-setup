@@ -14,6 +14,26 @@ return {
 			desc = "󰉶 Format file or selection",
 		},
 		{ "<leader>cC", "<cmd>ConformInfo<cr>", desc = "󰋼 Formatter info for this buffer" },
+		-- Format-on-save switches, buffer-local or global. They live under the UI
+		-- toggles group with every other on/off switch.
+		{
+			"<leader>uf",
+			require("util.toggle").new("Format on save (buffer)", function()
+				return not vim.b.disable_autoformat
+			end, function(v)
+				vim.b.disable_autoformat = not v
+			end),
+			desc = "Toggle format on save (buffer)",
+		},
+		{
+			"<leader>uF",
+			require("util.toggle").new("Format on save (global)", function()
+				return not vim.g.disable_autoformat
+			end, function(v)
+				vim.g.disable_autoformat = not v
+			end),
+			desc = "Toggle format on save (global)",
+		},
 	},
 	config = function()
 		local conform = require("conform")
@@ -120,25 +140,5 @@ return {
 				}
 			end,
 		})
-
-		-- Toggle format-on-save, buffer-local or global. Lives under the UI
-		-- toggles group with every other on/off switch.
-		vim.keymap.set("n", "<leader>uf", function()
-			vim.b.disable_autoformat = not vim.b.disable_autoformat
-			vim.notify(
-				(vim.b.disable_autoformat and "󰔢 " or "󰔡 ")
-					.. "Format on save (buffer): "
-					.. (vim.b.disable_autoformat and "off" or "on")
-			)
-		end, { desc = "Toggle format on save (buffer)" })
-
-		vim.keymap.set("n", "<leader>uF", function()
-			vim.g.disable_autoformat = not vim.g.disable_autoformat
-			vim.notify(
-				(vim.g.disable_autoformat and "󰔢 " or "󰔡 ")
-					.. "Format on save (global): "
-					.. (vim.g.disable_autoformat and "off" or "on")
-			)
-		end, { desc = "Toggle format on save (global)" })
 	end,
 }

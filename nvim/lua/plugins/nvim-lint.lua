@@ -8,6 +8,49 @@
 return {
 	"mfussenegger/nvim-lint",
 	event = { "BufReadPre", "BufNewFile" },
+	keys = {
+		{
+			"<leader>cl",
+			function()
+				require("lint").try_lint()
+			end,
+			desc = "󰁨 Lint this file now",
+		},
+		-- Which linters would run here? Useful when a file isn't being linted
+		-- and it isn't obvious whether that's config or a missing binary.
+		{
+			"<leader>cL",
+			function()
+				local lint = require("lint")
+				local names = lint.linters_by_ft[vim.bo.filetype] or {}
+				if #names == 0 then
+					vim.notify(("No nvim-lint linters for filetype %q"):format(vim.bo.filetype))
+					return
+				end
+				local lines = {}
+				for _, name in ipairs(names) do
+					local linter = lint.linters[name]
+					local cmd = linter and (type(linter.cmd) == "function" and linter.cmd() or linter.cmd)
+					local available = cmd and vim.fn.executable(cmd) == 1
+					local gated = linter and linter.condition and not linter.condition({})
+					table.insert(
+						lines,
+						("%s  %s%s"):format(
+							available and "✓" or "✗",
+							name,
+							gated and "  (skipped: no project config)" or ""
+						)
+					)
+				end
+				vim.notify(
+					table.concat(lines, "\n"),
+					vim.log.levels.INFO,
+					{ title = "Linters for " .. vim.bo.filetype }
+				)
+			end,
+			desc = "󰋼 Show linters for this filetype",
+		},
+	},
 	config = function()
 		local lint = require("lint")
 
@@ -78,35 +121,5 @@ return {
 				lint.try_lint(nil, { ignore_errors = true })
 			end,
 		})
-
-		vim.keymap.set("n", "<leader>cl", function()
-			lint.try_lint()
-		end, { desc = "󰁨 Lint this file now" })
-
-		-- Which linters would run here? Useful when a file isn't being linted
-		-- and it isn't obvious whether that's config or a missing binary.
-		vim.keymap.set("n", "<leader>cL", function()
-			local names = lint.linters_by_ft[vim.bo.filetype] or {}
-			if #names == 0 then
-				vim.notify(("No nvim-lint linters for filetype %q"):format(vim.bo.filetype))
-				return
-			end
-			local lines = {}
-			for _, name in ipairs(names) do
-				local linter = lint.linters[name]
-				local cmd = linter and (type(linter.cmd) == "function" and linter.cmd() or linter.cmd)
-				local available = cmd and vim.fn.executable(cmd) == 1
-				local gated = linter and linter.condition and not linter.condition({})
-				table.insert(
-					lines,
-					("%s  %s%s"):format(
-						available and "✓" or "✗",
-						name,
-						gated and "  (skipped: no project config)" or ""
-					)
-				)
-			end
-			vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO, { title = "Linters for " .. vim.bo.filetype })
-		end, { desc = "󰋼 Show linters for this filetype" })
 	end,
 }

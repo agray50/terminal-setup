@@ -76,42 +76,6 @@ vim.api.nvim_create_autocmd("BufWritePre", {
 	end,
 })
 
--- Strip trailing whitespace on save, but only on lines you actually touched is
--- not possible cheaply, so: only for filetypes where it is unambiguously noise.
--- Markdown is excluded because two trailing spaces is a hard line break.
-vim.api.nvim_create_autocmd("BufWritePre", {
-	group = augroup("trim_whitespace"),
-	pattern = {
-		"*.lua",
-		"*.sh",
-		"*.bash",
-		"*.zsh",
-		"*.py",
-		"*.go",
-		"*.java",
-		"*.ts",
-		"*.tsx",
-		"*.js",
-		"*.jsx",
-		"*.tf",
-		"*.hcl",
-		"*.yaml",
-		"*.yml",
-		"*.json",
-		"*.css",
-		"*.scss",
-		"*.html",
-		"*.sql",
-	},
-	callback = function()
-		-- conform.nvim formats most of these; this catches the filetypes with
-		-- no formatter configured and runs before format_on_save either way.
-		local view = vim.fn.winsaveview()
-		pcall(vim.cmd, [[keeppatterns %s/\s\+$//e]])
-		vim.fn.winrestview(view)
-	end,
-})
-
 -- Resize splits proportionally when the terminal window changes size, so a
 -- tmux pane resize doesn't leave a 3-line window behind.
 vim.api.nvim_create_autocmd("VimResized", {

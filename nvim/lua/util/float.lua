@@ -51,6 +51,12 @@ function M.toggle(opts)
 		return
 	end
 
+	local bin = type(opts.cmd) == "table" and opts.cmd[1] or opts.cmd
+	if vim.fn.executable(bin) == 0 then
+		vim.notify(bin .. " not found in PATH — run ./setup.sh to install it", vim.log.levels.ERROR)
+		return
+	end
+
 	t = t or {}
 	terms[name] = t
 

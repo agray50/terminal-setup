@@ -4,6 +4,36 @@
 -- nearest test in Python, Go and Java, which is the thing a debugger is
 -- actually used for most days.
 
+-- <leader>dt / <leader>dT: debug the nearest test, or the whole class. Each
+-- language's adapter exposes this differently, so per filetype: the module, then
+-- the function each key calls in it. dap-go has no class-level runner, so both
+-- keys debug the nearest test there.
+local test_runners = {
+	python = { "dap-python", nearest = "test_method", class = "test_class" },
+	go = { "dap-go", nearest = "debug_test", class = "debug_test" },
+	java = { "jdtls", nearest = "test_nearest_method", class = "test_class" },
+}
+
+---@param kind "nearest"|"class"
+local function debug_test(kind)
+	return function()
+		local runner = test_runners[vim.bo.filetype]
+		if runner then
+			return require(runner[1])[runner[kind]]()
+		end
+		-- neotest knows about the remaining languages and can run any of its
+		-- adapters under a DAP strategy.
+		local ok, neotest = pcall(require, "neotest")
+		if not ok then
+			vim.notify("No DAP test runner for filetype: " .. vim.bo.filetype, vim.log.levels.WARN)
+		elseif kind == "nearest" then
+			neotest.run.run({ strategy = "dap" })
+		else
+			neotest.run.run({ vim.fn.expand("%"), strategy = "dap" })
+		end
+	end
+end
+
 return {
 	{
 		"mfussenegger/nvim-dap",
@@ -253,50 +283,8 @@ return {
 				desc = "󰞷 Toggle DAP REPL",
 			},
 
-			-- Debug the nearest test. Dispatches per filetype because each
-			-- language's adapter exposes this differently.
-			{
-				"<leader>dt",
-				function()
-					local ft = vim.bo.filetype
-					if ft == "python" then
-						require("dap-python").test_method()
-					elseif ft == "go" then
-						require("dap-go").debug_test()
-					elseif ft == "java" then
-						require("jdtls").test_nearest_method()
-					else
-						-- neotest knows about the remaining languages and can run
-						-- any of its adapters under a DAP strategy.
-						local ok, neotest = pcall(require, "neotest")
-						if ok then
-							neotest.run.run({ strategy = "dap" })
-						else
-							vim.notify("No DAP test runner for filetype: " .. ft, vim.log.levels.WARN)
-						end
-					end
-				end,
-				desc = "󰙨 Debug nearest test",
-			},
-			{
-				"<leader>dT",
-				function()
-					local ft = vim.bo.filetype
-					if ft == "python" then
-						require("dap-python").test_class()
-					elseif ft == "go" then
-						require("dap-go").debug_test()
-					elseif ft == "java" then
-						require("jdtls").test_class()
-					else
-						local ok, neotest = pcall(require, "neotest")
-						if ok then
-							neotest.run.run({ vim.fn.expand("%"), strategy = "dap" })
-						end
-					end
-				end,
-				desc = "󰙨 Debug test class / file",
-			},
+			{ "<leader>dt", debug_test("nearest"), desc = "󰙨 Debug nearest test" },
+			{ "<leader>dT", debug_test("class"), desc = "󰙨 Debug test class / file" },
 		},
 		config = function()
 			local dap = require("dap")

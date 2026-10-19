@@ -9,12 +9,6 @@
 -- Everything that opens has a matching close: <leader>gx closes diffview,
 -- <leader>gg toggles lazygit, and <leader>qz closes every tool panel at once.
 
-local function fzf(fn, opts)
-	return function()
-		require("fzf-lua")[fn](opts)
-	end
-end
-
 return {
 	-----------------------------------------------------------------------
 	-- lazygit — primary git UI, in a floating terminal
@@ -30,10 +24,6 @@ return {
 			{
 				"<leader>gg",
 				function()
-					if vim.fn.executable("lazygit") == 0 then
-						vim.notify("lazygit not found in PATH — run ./setup.sh to install it", vim.log.levels.ERROR)
-						return
-					end
 					require("util.float").toggle({
 						name = "lazygit",
 						cmd = "lazygit",
@@ -67,12 +57,12 @@ return {
 	{
 		"ibhagwan/fzf-lua",
 		keys = {
-			{ "<leader>gc", fzf("git_commits"), desc = "󰜘 Commits (repo)" },
-			{ "<leader>gC", fzf("git_bcommits"), desc = "󰜘 Commits (this file)" },
-			{ "<leader>gb", fzf("git_branches"), desc = "󰘬 Branches" },
-			{ "<leader>gs", fzf("git_status"), desc = "󰋽 Status" },
-			{ "<leader>gS", fzf("git_stash"), desc = "󰆓 Stashes" },
-			{ "<leader>gt", fzf("git_tags"), desc = "󰓹 Tags" },
+			{ "<leader>gc", "<cmd>FzfLua git_commits<cr>", desc = "󰜘 Commits (repo)" },
+			{ "<leader>gC", "<cmd>FzfLua git_bcommits<cr>", desc = "󰜘 Commits (this file)" },
+			{ "<leader>gb", "<cmd>FzfLua git_branches<cr>", desc = "󰘬 Branches" },
+			{ "<leader>gs", "<cmd>FzfLua git_status<cr>", desc = "󰋽 Status" },
+			{ "<leader>gS", "<cmd>FzfLua git_stash<cr>", desc = "󰆓 Stashes" },
+			{ "<leader>gt", "<cmd>FzfLua git_tags<cr>", desc = "󰓹 Tags" },
 		},
 	},
 

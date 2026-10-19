@@ -210,68 +210,32 @@ end, { desc = "Previous error" })
 -- ---------------------------------------------------------------------------
 -- UI toggles — <leader>u
 -- ---------------------------------------------------------------------------
--- A small helper so each toggle reports its new state rather than leaving you
--- guessing which way it just went.
-local function toggle(desc, get, set)
-	return function()
-		local new = not get()
-		set(new)
-		vim.notify((new and "󰔡 " or "󰔢 ") .. desc .. ": " .. (new and "on" or "off"))
-	end
+local toggle = require("util.toggle").new
+
+-- Plain window-local booleans.
+for _, t in ipairs({
+	{ "<leader>uw", "wrap", "Wrap" },
+	{ "<leader>ul", "relativenumber", "Relative numbers" },
+	{ "<leader>un", "number", "Line numbers" },
+	{ "<leader>us", "spell", "Spell check" },
+}) do
+	local key, opt, label = t[1], t[2], t[3]
+	map(
+		"n",
+		key,
+		toggle(label, function()
+			return vim.wo[opt]
+		end, function(v)
+			vim.wo[opt] = v
+		end),
+		{ desc = "Toggle " .. label:lower() }
+	)
 end
 
 map(
 	"n",
-	"<leader>uw",
-	toggle("Wrap", function()
-		return vim.wo.wrap
-	end, function(v)
-		vim.wo.wrap = v
-	end),
-	{ desc = "Toggle wrap" }
-)
-
-map(
-	"n",
-	"<leader>ul",
-	toggle("Relative numbers", function()
-		return vim.wo.relativenumber
-	end, function(v)
-		vim.wo.relativenumber = v
-	end),
-	{ desc = "Toggle relative numbers" }
-)
-
-map(
-	"n",
-	"<leader>un",
-	toggle("Line numbers", function()
-		return vim.wo.number
-	end, function(v)
-		vim.wo.number = v
-	end),
-	{ desc = "Toggle line numbers" }
-)
-
-map(
-	"n",
-	"<leader>us",
-	toggle("Spell check", function()
-		return vim.wo.spell
-	end, function(v)
-		vim.wo.spell = v
-	end),
-	{ desc = "Toggle spell check" }
-)
-
-map(
-	"n",
 	"<leader>ud",
-	toggle("Diagnostics", function()
-		return vim.diagnostic.is_enabled()
-	end, function(v)
-		vim.diagnostic.enable(v)
-	end),
+	toggle("Diagnostics", vim.diagnostic.is_enabled, vim.diagnostic.enable),
 	{ desc = "Toggle diagnostics" }
 )
 
@@ -308,18 +272,24 @@ map("n", "<leader>uv", function()
 end, { desc = "Toggle diagnostic display style" })
 
 -- Inlay hints are genuinely useful in TS/Go/Rust and genuinely noisy in review.
-map("n", "<leader>uh", function()
-	local enabled = not vim.lsp.inlay_hint.is_enabled({ bufnr = 0 })
-	vim.lsp.inlay_hint.enable(enabled, { bufnr = 0 })
-	vim.notify((enabled and "󰔡 " or "󰔢 ") .. "Inlay hints: " .. (enabled and "on" or "off"))
-end, { desc = "Toggle inlay hints" })
+map(
+	"n",
+	"<leader>uh",
+	toggle("Inlay hints", function()
+		return vim.lsp.inlay_hint.is_enabled({ bufnr = 0 })
+	end, function(v)
+		vim.lsp.inlay_hint.enable(v, { bufnr = 0 })
+	end),
+	{ desc = "Toggle inlay hints" }
+)
+
+-- Inspect the treesitter tree / highlight under the cursor — the fastest way to
+-- work out why a highlight or indent rule is behaving oddly. Built-in commands.
+map("n", "<leader>ui", "<cmd>InspectTree<cr>", { desc = "󰙅 Inspect treesitter tree" })
+map("n", "<leader>uI", "<cmd>Inspect<cr>", { desc = "󰈈 Inspect highlight under cursor" })
 
 -- k9s in the same float as lazygit and the terminal.
 map("n", "<leader>uk", function()
-	if vim.fn.executable("k9s") == 0 then
-		vim.notify("k9s not found in PATH — run ./setup.sh", vim.log.levels.ERROR)
-		return
-	end
 	require("util.float").toggle({ name = "k9s", cmd = "k9s", title = "k9s", scale = 0.95 })
 end, { desc = "󱃾 Toggle k9s (Kubernetes)" })
 

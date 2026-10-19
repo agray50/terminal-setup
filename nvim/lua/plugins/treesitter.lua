@@ -165,11 +165,6 @@ return {
 					vim.wo[0][0].foldexpr = "v:lua.vim.treesitter.foldexpr()"
 				end,
 			})
-
-			-- Inspect the tree under the cursor — the fastest way to work out
-			-- why a highlight or indent rule is behaving oddly.
-			vim.keymap.set("n", "<leader>ui", "<cmd>InspectTree<cr>", { desc = "󰙅 Inspect treesitter tree" })
-			vim.keymap.set("n", "<leader>uI", "<cmd>Inspect<cr>", { desc = "󰈈 Inspect highlight under cursor" })
 		end,
 	},
 
