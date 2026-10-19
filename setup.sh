@@ -943,6 +943,7 @@ alias gra='git rebase --abort'
 # neovim
 alias v='nvim'
 alias vi='nvim'
+alias gg='nvim -c Git'   # fugitive's status view, full-screen
 BLOCK_EOF
     success "Aliases configured"
 }

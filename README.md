@@ -675,6 +675,7 @@ Aliases: `git lg` (graph log), `git ri` / `rc` / `ra` (rebase interactive / cont
 | `cat` | bat, no pager |
 | `json` / `yaml` | `jq .` / `yq .` |
 | `v` / `vi` | nvim |
+| `gg` | nvim on fugitive's git status (`:Git`) |
 | `lg` | lazygit — the same UI as `<leader>gg` |
 | `gs` `gd` `gds` `gl` | git status / diff / diff --staged / graph log |
 | `gco` `gcb` | git checkout / checkout -b |
