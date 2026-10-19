@@ -509,7 +509,7 @@ and lint produces diagnostics.
 | Helm | `helm_ls` | (whitespace only²) | — | — |
 | CSS / SCSS / Tailwind | `cssls`, `tailwindcss`, `emmet` | prettierd | (LSP) | — |
 | Dockerfile | `docker_language_server` | — | hadolint | — |
-| SQL | `sqls` | sql-formatter | — | — |
+| SQL | `sqls`³ | sql-formatter | — | — |
 | TOML | `taplo` | taplo | — | — |
 | Markdown | `marksman` | prettierd | markdownlint-cli2 | — |
 | Lua | `lua_ls` + lazydev | stylua | — | — |
@@ -519,9 +519,13 @@ and lint produces diagnostics.
 ¹ checkstyle only runs when the project actually has a `checkstyle.xml` — ungated it errors out
 and the errors surface as mystery diagnostics.
 ² prettier would mangle Go template syntax, so Helm templates get whitespace trimming only.
+³ only started once it has a connection — `~/.config/sqls/config.yml`, or a project `config.yml`
+with a `connections:` key. Without one it can only report "no database connection"; completion
+then comes from dadbod (see [Database](#database)).
 
-Tailwind classes are resolved inside `cva()`, `cn()`, `clsx()` and `cx()` helpers, and rendered
-as inline colour swatches.
+`tailwindcss` only starts in projects that use Tailwind (a `tailwind.config.*`, or `tailwindcss`
+in `package.json`). Its classes are resolved inside `cva()`, `cn()`, `clsx()` and `cx()` helpers,
+and rendered as inline colour swatches.
 
 ### Database
 

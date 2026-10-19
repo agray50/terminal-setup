@@ -240,6 +240,27 @@ return {
 					"vue",
 					"svelte",
 				},
+				-- Upstream's root_dir falls back to `.git` (for v4, which needs no
+				-- config file), so a 105 MB server spawned in every JS/TS repo.
+				-- Require real evidence instead: a config file, or tailwindcss
+				-- (incl. @tailwindcss/*) in package.json — which v4 still needs.
+				root_dir = function(bufnr, on_dir)
+					local util = require("lspconfig.util")
+					local fname = vim.api.nvim_buf_get_name(bufnr)
+					local markers = {
+						"tailwind.config.js",
+						"tailwind.config.cjs",
+						"tailwind.config.mjs",
+						"tailwind.config.ts",
+						"theme/static_src/tailwind.config.js", -- django-tailwind
+					}
+					markers = util.insert_package_json(markers, "tailwindcss", fname)
+					markers = util.root_markers_with_field(markers, { "mix.lock", "Gemfile.lock" }, "tailwind", fname)
+					local found = vim.fs.find(markers, { path = fname, upward = true })[1]
+					if found then
+						on_dir(vim.fs.dirname(found))
+					end
+				end,
 				settings = {
 					tailwindCSS = {
 						-- Recognise Tailwind classes inside cva/clsx/cn helpers
@@ -256,6 +277,44 @@ return {
 						},
 					},
 				},
+			})
+
+			-------------------------------------------------------------
+			-- SQL
+			-------------------------------------------------------------
+			-- Without a connection sqls offers nothing dadbod, snippets and
+			-- sql-formatter don't already, but it greets every SQL buffer with
+			-- "LSP[sqls] no database connection". Start it only once it has a
+			-- config: ~/.config/sqls/config.yml, or a project config.yml that
+			-- declares connections (upstream matches any config.yml at all).
+			-- sqls only reads the former by itself, so point it at the latter.
+			local function sqls_project_config(dir)
+				local path = vim.fs.find("config.yml", { path = dir, upward = true })[1]
+				local ok, lines = pcall(vim.fn.readfile, path or "")
+				if ok and vim.iter(lines):any(function(l)
+					return l:match("^connections:")
+				end) then
+					return path
+				end
+			end
+			vim.lsp.config("sqls", {
+				cmd = function(dispatchers, config)
+					local cmd = { "sqls" }
+					local project = config.root_dir and sqls_project_config(config.root_dir)
+					if project then
+						vim.list_extend(cmd, { "-config", project })
+					end
+					return vim.lsp.rpc.start(cmd, dispatchers, { cwd = config.root_dir })
+				end,
+				root_dir = function(bufnr, on_dir)
+					local fname = vim.api.nvim_buf_get_name(bufnr)
+					local project = sqls_project_config(vim.fs.dirname(fname))
+					if project then
+						on_dir(vim.fs.dirname(project))
+					elseif vim.uv.fs_stat(vim.fn.expand("~/.config/sqls/config.yml")) then
+						on_dir(vim.fs.root(bufnr, ".git") or vim.fs.dirname(fname))
+					end
+				end,
 			})
 
 			-------------------------------------------------------------

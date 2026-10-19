@@ -567,7 +567,7 @@ check_shell_init() {
 make_fixture() {
     local fx="$WORK/fixture"
     [[ -d "$fx/.git" ]] && return 0
-    mkdir -p "$fx"/{src,k8s,chart/templates,sql,rs/src,java/src/main/java}
+    mkdir -p "$fx"/{src,k8s,chart/templates,sql,sql-noconn,rs/src,java/src/main/java}
 
     printf '{ "name": "fixture", "version": "1.0.0", "dependencies": { "react": "^18.0.0" } }\n' > "$fx/package.json"
     printf '{ "compilerOptions": { "jsx": "react-jsx", "strict": true, "target": "ES2020" } }\n' > "$fx/tsconfig.json"
@@ -585,6 +585,9 @@ make_fixture() {
     printf '# Title\n\nSome text.\n' > "$fx/README.md"
     printf '.btn { color: red; }\n' > "$fx/style.css"
     printf 'SELECT 1;\n' > "$fx/sql/q.sql"
+    # sqls only starts once it has a connection (see lsp-config.lua).
+    printf 'connections:\n  - driver: sqlite3\n    dataSourceName: %s/sql/fixture.db\n' "$fx" > "$fx/sql/config.yml"
+    printf 'SELECT 1;\n' > "$fx/sql-noconn/q.sql"
     printf 'local M = {}\nreturn M\n' > "$fx/conf.lua"
     printf 'query { user { id } }\n' > "$fx/q.graphql"
     printf 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: a\nspec:\n  replicas: 1\n' > "$fx/k8s/deployment.yaml"
@@ -609,9 +612,26 @@ check_languages() {
 local F = vim.env.FIXTURE
 local out = {}
 
+-- A server that attaches but greets every buffer with a warning is exactly the
+-- "random errors" this config exists to avoid (sqls did, on every SQL file, at
+-- INFO level -- hence INFO, not WARN), so capture notifications per buffer.
+-- mini.notify replaces vim.notify at VeryLazy; install the capture after it or
+-- it is simply overwritten.
+vim.cmd("doautocmd User VeryLazy")
+local notes = {}
+local original = vim.notify
+vim.notify = function(msg, level, opts)
+	if (level or 0) >= vim.log.levels.INFO then
+		notes[#notes + 1] = tostring(msg):gsub("\n", " ")
+	end
+	return original(msg, level, opts)
+end
+
 -- file | filetype | every LSP that must attach | formatters conform must run | linters that must be registered and executable
+-- | (optional) LSPs that must NOT attach
 local cases = {
-	{ "src/App.tsx", "typescriptreact", { "vtsls" }, { "prettierd" }, {} },
+	-- No Tailwind in the fixture, so its 105 MB server must stay out.
+	{ "src/App.tsx", "typescriptreact", { "vtsls" }, { "prettierd" }, {}, { "tailwindcss" } },
 	{ "src/util.ts", "typescript", { "vtsls" }, { "prettierd" }, {} },
 	{ "main.py", "python", { "basedpyright", "ruff" }, { "ruff_organize_imports", "ruff_format" }, {} },
 	{ "main.go", "go", { "gopls" }, { "goimports", "gofumpt" }, { "golangcilint" } },
@@ -626,6 +646,8 @@ local cases = {
 	{ "style.css", "css", { "cssls" }, { "prettierd" }, {} },
 	{ "README.md", "markdown", { "marksman" }, { "prettierd" }, { "markdownlint-cli2" } },
 	{ "sql/q.sql", "sql", { "sqls" }, { "sql_formatter" }, {} },
+	-- No connection configured: sqls must stay out rather than complain.
+	{ "sql-noconn/q.sql", "sql", {}, { "sql_formatter" }, {}, { "sqls" } },
 	{ "conf.lua", "lua", { "lua_ls" }, { "stylua" }, {} },
 	{ "q.graphql", "graphql", { "graphql" }, { "prettierd" }, {} },
 	-- rustaceanvim registers the client under its hyphenated upstream name.
@@ -647,7 +669,8 @@ local function missing(want, got)
 end
 
 for _, c in ipairs(cases) do
-	local file, want_ft, want_lsp, want_fmt, want_lint = c[1], c[2], c[3], c[4], c[5]
+	local file, want_ft, want_lsp, want_fmt, want_lint, forbid_lsp = c[1], c[2], c[3], c[4], c[5], c[6] or {}
+	notes = {}
 	vim.cmd.edit(F .. "/" .. file)
 	local buf = vim.api.nvim_get_current_buf()
 	local ft = vim.bo[buf].filetype
@@ -705,6 +728,17 @@ for _, c in ipairs(cases) do
 		problems[#problems + 1] = "no linter: " .. table.concat(lgaps, ", ")
 	end
 
+	-- Servers report startup problems shortly after attaching, not during it.
+	vim.wait(1500)
+	for _, cl in ipairs(vim.lsp.get_clients({ bufnr = buf })) do
+		if vim.tbl_contains(forbid_lsp, cl.name) then
+			problems[#problems + 1] = "unwanted LSP: " .. cl.name
+		end
+	end
+	for _, n in ipairs(notes) do
+		problems[#problems + 1] = "notified: " .. n
+	end
+
 	out[#out + 1] = (#problems == 0 and "OK\t" or "FAIL\t") .. file .. "\t" .. table.concat(problems, "; ")
 end
 
@@ -729,7 +763,7 @@ LUAEOF
             fail "$file — $detail"
         fi
     done < "$WORK/lang.txt"
-    [[ $n_ok -gt 0 ]] && pass "$n_ok language(s): LSP attaches, formatter resolves, linter executable"
+    [[ $n_ok -gt 0 ]] && pass "$n_ok language(s): LSP attaches, formatter resolves, linter executable, no warnings"
 }
 
 # -----------------------------------------------------------------------------
