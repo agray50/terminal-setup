@@ -36,7 +36,7 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 DRY_RUN=false
-MODE="install"   # install | update | check | print-block
+MODE="install"   # install | update | check | print-block | install-hook
 PRINT_BLOCK=""
 
 while [[ $# -gt 0 ]]; do
@@ -44,6 +44,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run) DRY_RUN=true ;;
         --update)  MODE="update" ;;
         --check)   MODE="check" ;;
+        --install-hook) MODE="install-hook" ;;
         --print-block)
             MODE="print-block"
             PRINT_BLOCK="${2:-}"
@@ -63,6 +64,10 @@ Usage: ./setup.sh [OPTION]
   --check       Report drift between versions.lock and what is installed.
 
   --dry-run     Show what would be installed/changed without changing anything.
+
+  --install-hook
+                Install a git pre-commit hook in this checkout that runs
+                ./scripts/verify.sh (the fast checks, ~3s).
 
   --print-block <nvm|pyenv|goenv>
                 Print the managed ~/.zshrc block for a version manager, exactly
@@ -1268,6 +1273,37 @@ setup_tmux_plugin_pins() {
 }
 
 # -----------------------------------------------------------------------------
+# --install-hook : run the fast verify suite before every commit
+# -----------------------------------------------------------------------------
+
+install_hook() {
+    local hooks hook marker="# installed by terminal-setup ./setup.sh --install-hook"
+    # --git-path also handles worktrees and core.hooksPath. It answers relative
+    # to the repo; --path-format=absolute would avoid that but needs git 2.31.
+    hooks=$(git -C "$SCRIPT_DIR" rev-parse --git-path hooks 2>/dev/null) || {
+        error "$SCRIPT_DIR is not a git checkout"
+        return 1
+    }
+    [[ "$hooks" == /* ]] || hooks="$SCRIPT_DIR/$hooks"
+    hook="$hooks/pre-commit"
+    # Never clobber a hook someone else wrote.
+    if [[ -e "$hook" ]] && ! grep -qF "$marker" "$hook"; then
+        error "a pre-commit hook already exists at $hook — add ./scripts/verify.sh to it by hand"
+        return 1
+    fi
+    dry_skip "would install $hook" && return 0
+    mkdir -p "$hooks"
+    cat > "$hook" <<HOOK_EOF
+#!/bin/sh
+${marker}
+# Bypass once with: git commit --no-verify
+exec "\$(git rev-parse --show-toplevel)/scripts/verify.sh"
+HOOK_EOF
+    chmod 755 "$hook"
+    success "pre-commit hook installed: $hook"
+}
+
+# -----------------------------------------------------------------------------
 # Prerequisite Check
 # -----------------------------------------------------------------------------
 
@@ -1311,6 +1347,7 @@ main() {
     case "$MODE" in
         update) do_update; exit 0 ;;
         check)  do_check;  exit 0 ;;
+        install-hook) install_hook; exit ;;
     esac
 
     echo "============================================="

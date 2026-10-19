@@ -174,16 +174,21 @@ check_lockfile() {
 # wrong value is invisible to a pcall-based check and only shows up as a message
 # the user has to notice. This asserts a clean start produces no notification at
 # WARN level or above.
-check_notifications() {
-    head1 "Startup diagnostics"
-    cat > "$WORK/notify.lua" <<'LUAEOF'
--- Load everything first. mini.notify REPLACES vim.notify during VeryLazy, so
--- the capture has to be installed after that or it is simply overwritten.
-vim.cmd("doautocmd User VeryLazy")
-vim.wait(3000)
-vim.cmd.edit(vim.env.REPO_ROOT .. "/nvim/init.lua")
-vim.wait(4000)
+# One headless session shared by the theme, statusline and notify checks. They
+# used to start three, each with its own fixed sleeps (~20s between them, under
+# 1s of real work). Waits now end as soon as their condition holds.
+#
+# Writes $WORK/ui.txt: "THEME OK|MISSING <name>", "STATUS <flags>" and one
+# "NOTE <text>" per problem. Run once; later callers reuse the file.
+ui_probe() {
+    [[ -f "$WORK/ui.txt" ]] && return 0
+    cat > "$WORK/ui.lua" <<'LUAEOF'
+local out = {}
 
+-- Capture before anything else happens: earlier versions installed this after
+-- ~7s of waiting, so every notification sent before then went unseen.
+-- mini.notify REPLACES vim.notify during VeryLazy, so wrap whatever it leaves.
+vim.cmd("doautocmd User VeryLazy")
 local captured = {}
 local original = vim.notify
 vim.notify = function(msg, level, opts)
@@ -192,38 +197,54 @@ vim.notify = function(msg, level, opts)
 end
 vim.notify_once = vim.notify
 
+-- A real tracked file: lua_ls and gitsigns attach to it, as in daily use.
+vim.cmd.edit(vim.env.REPO_ROOT .. "/nvim/init.lua")
+vim.wait(10000, function()
+	return #vim.lsp.get_clients({ bufnr = 0 }) > 0 and vim.b.gitsigns_status_dict ~= nil
+end, 50)
+-- Servers report startup problems just after attaching, not during it.
+vim.wait(500)
+
+-- Theme: lualine falls back to "auto" on an unknown name and carries on.
+local cfg = require("lualine.config").get_config().options
+local theme = cfg.theme
+local resolves = type(theme) ~= "string" or pcall(require, "lualine.themes." .. theme)
+table.insert(out, (resolves and "THEME OK " or "THEME MISSING ") .. tostring(theme))
+
+-- Statusline: separators configured, and actually present once rendered.
 pcall(function()
 	require("lualine").refresh()
 end)
--- lualine reports config problems through a 2s deferred vim.notify, so give it
--- time to fire rather than racing it.
-vim.wait(3500)
+local sep = (cfg.section_separators or {}).left or ""
+local sub = (cfg.component_separators or {}).left or ""
+vim.o.columns = 120
+local s = vim.api.nvim_eval_statusline(vim.o.statusline, { maxwidth = 120 })
+table.insert(out, "STATUS " .. table.concat({
+	sep ~= "" and "SEP_SET" or "SEP_EMPTY",
+	sub ~= "" and "SUB_SET" or "SUB_EMPTY",
+	(sep ~= "" and s.str:find(sep, 1, true)) and "SEP_RENDERED" or "SEP_ABSENT",
+	#s.str > 20 and "HAS_CONTENT" or "EMPTY_LINE",
+}, " "))
 
-local out = {}
+-- Notifications at WARN or above.
 for _, n in ipairs(captured) do
-	if (n.level or 0) >= vim.log.levels.WARN then
-		table.insert(out, "[notify] " .. n.msg:gsub("\n", " "))
+	if n.level >= vim.log.levels.WARN then
+		table.insert(out, "NOTE [notify] " .. n.msg:gsub("\n", " "))
 	end
 end
 
 -- lualine does not report configuration problems as a Lua error, and its
--- vim.notify only says "run :LualineNotices for details". The detail lives in a
--- module-local table, so render it the way :LualineNotices does and read the
--- buffer. This is what makes a bad theme name (or any invalid option) visible:
--- lualine otherwise falls back to "auto" and carries on silently.
+-- vim.notify (deferred 2s) only says "run :LualineNotices for details". The
+-- detail lives in a module-local table, so render it the way :LualineNotices
+-- does and read the buffer -- no need to wait out the deferred notify.
 local ok, notices = pcall(require, "lualine.utils.notices")
-if ok and notices.show_notices then
-	local before = vim.api.nvim_get_current_win()
-	if pcall(notices.show_notices) then
-		local buf = vim.api.nvim_get_current_buf()
-		for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
-			-- Skip the markdown headers and blank padding the notice format adds.
-			if line ~= "" and not line:match("^#") then
-				table.insert(out, "[lualine] " .. line)
-			end
+if ok and notices.show_notices and pcall(notices.show_notices) then
+	local buf = vim.api.nvim_get_current_buf()
+	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+		-- Skip the markdown headers and blank padding the notice format adds.
+		if line ~= "" and not line:match("^#") then
+			table.insert(out, "NOTE [lualine] " .. line)
 		end
-		pcall(vim.api.nvim_buf_delete, buf, { force = true })
-		pcall(vim.api.nvim_set_current_win, before)
 	end
 end
 
@@ -231,20 +252,29 @@ end
 local msgs = vim.api.nvim_exec2("messages", { output = true }).output or ""
 for _, line in ipairs(vim.split(msgs, "\n")) do
 	if line:match("^E%d+:") then
-		table.insert(out, "[messages] " .. line)
+		table.insert(out, "NOTE [messages] " .. line)
 	end
 end
 
-vim.fn.writefile(out, vim.env.NOTIFYFILE)
+vim.fn.writefile(out, vim.env.UIFILE)
 LUAEOF
-    if ! NOTIFYFILE="$WORK/notes.txt" REPO_ROOT="$REPO" \
-        nvim --headless -c "luafile $WORK/notify.lua" -c "qa!" >/dev/null 2>&1; then
+    UIFILE="$WORK/ui.txt" REPO_ROOT="$REPO" \
+        nvim --headless -c "luafile $WORK/ui.lua" -c "qa!" >/dev/null 2>&1
+    [[ -f "$WORK/ui.txt" ]] || : > "$WORK/ui.failed"
+}
+
+check_notifications() {
+    head1 "Startup diagnostics"
+    ui_probe
+    if [[ -f "$WORK/ui.failed" ]]; then
         fail "could not capture startup notifications"
         return
     fi
-    if [[ -s "$WORK/notes.txt" ]]; then
+    local notes
+    notes=$(sed -n 's/^NOTE //p' "$WORK/ui.txt")
+    if [[ -n "$notes" ]]; then
         fail "startup produced warnings/errors:"
-        sed 's/^/      /' "$WORK/notes.txt"
+        indent <<<"$notes"
     else
         pass "no warnings, lualine notices or errors on a clean start"
     fi
@@ -255,14 +285,9 @@ LUAEOF
 # -----------------------------------------------------------------------------
 check_lualine_theme() {
     head1 "lualine theme"
+    ui_probe
     local out
-    out=$(nvim --headless -c 'lua
-        vim.cmd("doautocmd User VeryLazy")
-        vim.wait(2500)
-        local theme = require("lualine.config").get_config().options.theme
-        local resolves = type(theme) ~= "string" or pcall(require, "lualine.themes." .. theme)
-        io.stdout:write((resolves and "OK " or "MISSING ") .. tostring(theme))
-    ' -c "qa!" 2>/dev/null)
+    out=$(sed -n 's/^THEME //p' "$WORK/ui.txt" 2>/dev/null)
     case "$out" in
         OK\ *)      pass "theme resolves: ${out#OK }" ;;
         MISSING\ *) fail "lualine theme ${out#MISSING } does not exist — lualine silently falls back to auto" ;;
@@ -300,7 +325,7 @@ check_gitconfig_compat() {
         hit=$(grep -nE "^[[:space:]]*${pattern}" "$cfg" || true)
         if [[ -n "$hit" ]]; then
             fail "needs git >= ${minver}, but git/gitconfig is shared with git ${MIN_GIT} machines:"
-            echo "$hit" | sed 's/^/      /'
+            indent <<<"$hit"
             echo "      -> move it to setup_gitconfig_version in setup.sh"
             bad=1
         fi
@@ -326,7 +351,7 @@ check_gitconfig_compat() {
         pass "git reads the resulting config without error"
     else
         fail "git errors reading the config:"
-        git -C "$REPO" status 2>&1 | sed 's/^/      /' | head -3
+        git -C "$REPO" status 2>&1 | indent | head -3
     fi
 }
 
@@ -349,31 +374,15 @@ check_statusline() {
         "$REPO/nvim" || true)
     if [[ -n "$stripped" ]]; then
         fail "glyph fields that are empty strings (codepoints likely stripped):"
-        echo "$stripped" | sed 's/^/      /'
+        indent <<<"$stripped"
     else
         pass "no empty glyph fields in nvim config"
     fi
 
     # 2. The rendered statusline must contain its separators and some content.
+    ui_probe
     local out
-    out=$(REPO_ROOT="$REPO" nvim --headless -c 'lua
-        vim.cmd("doautocmd User VeryLazy")
-        vim.wait(2500)
-        vim.cmd.edit(vim.env.REPO_ROOT .. "/nvim/init.lua")
-        vim.wait(4000)
-        pcall(function() require("lualine").refresh() end)
-        local cfg = require("lualine.config").get_config().options
-        local sep = (cfg.section_separators or {}).left or ""
-        local sub = (cfg.component_separators or {}).left or ""
-        vim.o.columns = 120
-        local s = vim.api.nvim_eval_statusline(vim.o.statusline, { maxwidth = 120 })
-        local parts = {}
-        table.insert(parts, (sep ~= "" and "SEP_SET" or "SEP_EMPTY"))
-        table.insert(parts, (sub ~= "" and "SUB_SET" or "SUB_EMPTY"))
-        table.insert(parts, (sep ~= "" and s.str:find(sep, 1, true)) and "SEP_RENDERED" or "SEP_ABSENT")
-        table.insert(parts, (#s.str > 20) and "HAS_CONTENT" or "EMPTY_LINE")
-        io.stdout:write(table.concat(parts, " "))
-    ' -c "qa!" 2>/dev/null)
+    out=$(sed -n 's/^STATUS //p' "$WORK/ui.txt" 2>/dev/null)
 
     case "$out" in
         *SEP_EMPTY*|*SUB_EMPTY*)
@@ -408,7 +417,6 @@ vim.cmd("Lazy! load " .. table.concat({
 	"vim-fugitive", "nvim-treesitter-textobjects", "vim-dadbod-ui",
 }, " "))
 vim.cmd("doautocmd User VeryLazy")
-vim.wait(2000)
 
 local out, seen = {}, {}
 local function add(lhs)
@@ -432,16 +440,22 @@ end
 -- A tracked Lua file in this repo: attaches lua_ls (LSP keys) and, because the
 -- repo is a git worktree, gitsigns (hunk keys).
 vim.cmd.edit(vim.env.REPO_ROOT .. "/nvim/init.lua")
+-- Done once both have mapped the buffer: gitsigns' on_attach (]c) and the
+-- LspAttach handler (gd). gitsigns' status dict appears before its keys do.
+local function buffer_mapped(lhs)
+	return vim.fn.maparg(lhs, "n", false, true).buffer == 1
+end
 vim.wait(12000, function()
-	return #vim.lsp.get_clients({ bufnr = 0 }) > 0
-end, 250)
-vim.wait(2500) -- let gitsigns attach and LspAttach keymaps register
+	return buffer_mapped("]c") and buffer_mapped("gd")
+end, 50)
 collect()
 
 -- A SQL buffer registers the dadbod query-execution keys.
 vim.cmd("enew")
 vim.bo.filetype = "sql"
-vim.wait(1200)
+vim.wait(3000, function()
+	return #vim.api.nvim_buf_get_keymap(0, "n") > 0
+end, 50)
 collect()
 
 vim.fn.writefile(out, vim.env.DUMPFILE)
@@ -454,8 +468,7 @@ LUAEOF
     local n; n=$(wc -l < "$WORK/keys.txt" | tr -d ' ')
     pass "dumped $n live mappings"
 
-    KEYS_FILE="$WORK/keys.txt" README_FILE="$REPO/README.md" python3 "$REPO/scripts/check_readme_keys.py"
-    if [[ $? -eq 0 ]]; then
+    if KEYS_FILE="$WORK/keys.txt" README_FILE="$REPO/README.md" python3 "$REPO/scripts/check_readme_keys.py"; then
         pass "every key documented in README.md exists in the config"
     else
         fail "README documents keys that do not exist (see above)"
@@ -618,10 +631,33 @@ make_fixture() {
         && git -c user.email=v@v -c user.name=v commit -qm fixture ) >/dev/null 2>&1
 }
 
+# Run a fixture probe written by check_languages / check_dap, then report its
+# output: one "OK|FAIL<TAB>name<TAB>detail" line per language.
+run_tsv_probe() {
+    local what="$1" script="$2" out="$3" summary="$4" fx="$WORK/fixture"
+    if ! ( cd "$fx" && FIXTURE="$fx" OUTFILE="$out" \
+            nvim --headless -c "luafile $script" -c "qa!" ) >/dev/null 2>&1; then
+        fail "$what probe did not complete"
+        return
+    fi
+    if [[ ! -s "$out" ]]; then
+        fail "$what probe produced no results"
+        return
+    fi
+    local status name detail n_ok=0
+    while IFS=$'\t' read -r status name detail; do
+        if [[ "$status" == "OK" ]]; then
+            n_ok=$((n_ok + 1))
+        else
+            fail "$name — $detail"
+        fi
+    done < "$out"
+    [[ $n_ok -gt 0 ]] && pass "$n_ok language(s): $summary"
+}
+
 check_languages() {
     head1 "Per-language support"
     make_fixture
-    local fx="$WORK/fixture"
 
     cat > "$WORK/lang.lua" <<'LUAEOF'
 local F = vim.env.FIXTURE
@@ -760,25 +796,7 @@ end
 vim.fn.writefile(out, vim.env.OUTFILE)
 LUAEOF
 
-    if ! ( cd "$fx" && FIXTURE="$fx" OUTFILE="$WORK/lang.txt" \
-            nvim --headless -c "luafile $WORK/lang.lua" -c "qa!" ) >/dev/null 2>&1; then
-        fail "language probe did not complete"
-        return
-    fi
-    if [[ ! -s "$WORK/lang.txt" ]]; then
-        fail "language probe produced no results"
-        return
-    fi
-
-    local status file detail n_ok=0
-    while IFS=$'\t' read -r status file detail; do
-        if [[ "$status" == "OK" ]]; then
-            n_ok=$((n_ok + 1))
-        else
-            fail "$file — $detail"
-        fi
-    done < "$WORK/lang.txt"
-    [[ $n_ok -gt 0 ]] && pass "$n_ok language(s): LSP attaches, formatter resolves, linter executable, no warnings"
+    run_tsv_probe language "$WORK/lang.lua" "$WORK/lang.txt" "LSP attaches, formatter resolves, linter executable, no warnings"
 }
 
 # -----------------------------------------------------------------------------
@@ -797,7 +815,6 @@ LUAEOF
 check_dap() {
     head1 "Debug adapters"
     make_fixture
-    local fx="$WORK/fixture"
 
     cat > "$WORK/dap.lua" <<'LUAEOF'
 local F = vim.env.FIXTURE
@@ -867,25 +884,7 @@ table.sort(out)
 vim.fn.writefile(out, vim.env.OUTFILE)
 LUAEOF
 
-    if ! ( cd "$fx" && FIXTURE="$fx" OUTFILE="$WORK/dap.txt" \
-            nvim --headless -c "luafile $WORK/dap.lua" -c "qa!" ) >/dev/null 2>&1; then
-        fail "DAP probe did not complete"
-        return
-    fi
-    if [[ ! -s "$WORK/dap.txt" ]]; then
-        fail "DAP probe produced no results"
-        return
-    fi
-
-    local status lang detail n_ok=0
-    while IFS=$'\t' read -r status lang detail; do
-        if [[ "$status" == "OK" ]]; then
-            n_ok=$((n_ok + 1))
-        else
-            fail "$lang — $detail"
-        fi
-    done < "$WORK/dap.txt"
-    [[ $n_ok -gt 0 ]] && pass "$n_ok language(s): adapter registered, executable, with configurations"
+    run_tsv_probe DAP "$WORK/dap.lua" "$WORK/dap.txt" "adapter registered, executable, with configurations"
 }
 
 case "$ONLY" in

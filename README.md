@@ -143,17 +143,23 @@ without the pin every language server, formatter and linter silently upgrades un
 After editing anything under `nvim/`, run:
 
 ```bash
-./scripts/verify.sh            # the fast checks (a few seconds)
+./scripts/verify.sh            # the fast checks (~3 seconds)
 ./scripts/verify.sh keymaps    # just README/config keymap consistency
 ./scripts/verify.sh languages  # every language: LSP, formatter, linter
 ./scripts/verify.sh dap        # every language: debug adapter + configurations
 ```
 
+The fast checks take about 3 seconds, so run them on every commit:
+`./setup.sh --install-hook` adds a git pre-commit hook that does exactly that (bypass once with
+`git commit --no-verify`).
+
 `languages` and `dap` are kept out of the default run because they stand up a real fixture
 project and wait for servers — jdtls alone takes most of a minute from cold. Run them after
 touching `mason.lua`, `lsp-config.lua`, `conform.lua`, `nvim-lint.lua`, `dap.lua` or `jdtls.lua`.
+`languages` also fails if any server **notifies** while a buffer loads, or attaches where it has
+no business (tailwindcss without Tailwind, sqls without a connection).
 
-It checks that every Lua file parses and is stylua-clean, that `setup.sh` parses under bash 3.2
+It checks that every Lua file parses and is stylua-clean, that `setup.sh` and `lib/` parse under bash 3.2
 (macOS's `/bin/bash`, which the script has to bootstrap under) and is shellcheck-clean, that
 `versions.lock` and the generated `nvim/lua/mason-pin.lua` agree, that the install path never
 resolves a version from the network, that a clean start produces **no warnings, lualine notices
