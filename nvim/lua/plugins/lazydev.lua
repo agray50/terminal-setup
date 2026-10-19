@@ -10,7 +10,6 @@ return {
 				-- Type definitions for the plugins configured here, so their
 				-- opts tables are checked and completed too.
 				{ path = "lazy.nvim", words = { "LazySpec" } },
-				{ path = "snacks.nvim", words = { "Snacks" } },
 			},
 		},
 	},

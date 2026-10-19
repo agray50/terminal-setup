@@ -218,23 +218,15 @@ return {
 				{ "[f", "@function.outer", "previous_start", "Previous function" },
 				{ "]F", "@function.outer", "next_end", "Next function end" },
 				{ "[F", "@function.outer", "previous_end", "Previous function end" },
-				{ "]c", "@class.outer", "next_start", "Next class" },
-				{ "[c", "@class.outer", "previous_start", "Previous class" },
 				{ "]a", "@parameter.inner", "next_start", "Next parameter" },
 				{ "[a", "@parameter.inner", "previous_start", "Previous parameter" },
 			}
 
 			for _, m in ipairs(motions) do
 				local key, query, direction, desc = m[1], m[2], m[3], m[4]
-				-- ]c / [c are gitsigns hunk navigation in a buffer with git
-				-- changes; gitsigns registers those per-buffer, so it wins
-				-- there and these apply elsewhere. Classes are rarer than
-				-- hunks, so that precedence is the right way round.
-				if key ~= "]c" and key ~= "[c" then
-					vim.keymap.set({ "n", "x", "o" }, key, function()
-						move["goto_" .. direction](query, "textobjects")
-					end, { desc = desc })
-				end
+				vim.keymap.set({ "n", "x", "o" }, key, function()
+					move["goto_" .. direction](query, "textobjects")
+				end, { desc = desc })
 			end
 
 			-- Swap a parameter left or right — reordering arguments without

@@ -208,7 +208,6 @@ vim.filetype.add({
 		["compose.yaml"] = "yaml.docker-compose",
 		["docker-bake.hcl"] = "hcl.docker-bake",
 		[".gitlab-ci.yml"] = "yaml.gitlab",
-		["Chart.yaml"] = "yaml",
 		["Chart.lock"] = "yaml",
 	},
 	pattern = {
@@ -221,9 +220,5 @@ vim.filetype.add({
 		-- values.yaml gets its own filetype so helm-ls can offer completion
 		-- against the chart's own values schema.
 		[".*/values.*%.ya?ml"] = "yaml.helm-values",
-		-- GitHub Actions workflows — schemastore validates these via yamlls.
-		[".*/%.github/workflows/.*%.ya?ml"] = "yaml",
-		-- Kubernetes manifests commonly live here; plain yaml + schemastore.
-		[".*/k8s/.*%.ya?ml"] = "yaml",
 	},
 })

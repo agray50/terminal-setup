@@ -29,9 +29,6 @@ return {
 					package_uninstalled = "✗",
 				},
 			},
-			-- Install serially. Parallel installs of heavy packages (jdtls,
-			-- rust-analyzer) on a cold machine can exhaust file handles.
-			max_concurrent_installers = 4,
 		},
 	},
 

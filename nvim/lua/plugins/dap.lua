@@ -329,11 +329,9 @@ return {
 			})
 
 			require("nvim-dap-virtual-text").setup({
-				-- Show the value of each variable inline, but only while a
-				-- session is actually stopped — otherwise it's visual noise.
-				enabled = true,
+				-- Show the value of each variable inline, at every definition
+				-- rather than only the first.
 				only_first_definition = false,
-				all_references = false,
 				virt_text_pos = "eol",
 			})
 

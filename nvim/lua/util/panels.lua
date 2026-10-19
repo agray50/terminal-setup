@@ -59,14 +59,6 @@ M.closers = {
 	["query"] = true, -- :InspectTree
 }
 
----Register (or override) a closer for a filetype. Lets a plugin spec declare
----its own panel without this file needing to know about it.
----@param ft string
----@param closer boolean|string
-function M.register(ft, closer)
-	M.closers[ft] = closer
-end
-
 ---Close every registered tool panel, floating terminal and DAP UI.
 ---Leaves normal file buffers alone.
 function M.close_all()

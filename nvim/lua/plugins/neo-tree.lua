@@ -23,8 +23,6 @@ return {
 	opts = {
 		close_if_last_window = true,
 		popup_border_style = "rounded",
-		enable_git_status = true,
-		enable_diagnostics = true,
 		-- Hide the directories that make a JS/Java tree unusable, but keep them
 		-- one keystroke away (H toggles hidden).
 		filesystem = {

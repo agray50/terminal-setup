@@ -49,10 +49,9 @@ return {
 		},
 		opts = {
 			indent = { char = "│", tab_char = "│" },
+			-- Highlight the enclosing block, which is the actually useful
+			-- part — it answers "which if am I inside".
 			scope = {
-				-- Highlight the enclosing block, which is the actually useful
-				-- part — it answers "which if am I inside".
-				enabled = true,
 				show_start = false,
 				show_end = false,
 			},
@@ -93,12 +92,10 @@ return {
 		opts = {
 			render = "virtual",
 			virtual_symbol = "󰝤",
-			virtual_symbol_position = "inline",
 			-- Resolve Tailwind class names (bg-blue-500) to their real colour,
 			-- not just raw hex values. This is the bit that matters when
 			-- working in a Tailwind codebase.
 			enable_tailwind = true,
-			enable_named_colors = true,
 			exclude_filetypes = { "lazy", "mason", "neo-tree", "trouble" },
 		},
 	},
@@ -130,7 +127,7 @@ return {
 				desc = "Previous TODO comment",
 			},
 		},
-		opts = { signs = true },
+		opts = {},
 	},
 
 	-----------------------------------------------------------------------

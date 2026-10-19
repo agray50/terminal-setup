@@ -35,9 +35,7 @@ return {
 	},
 	opts = {
 		focus = true,
-		-- Don't auto-open on diagnostics: that fights you while typing.
-		auto_close = true,
-		auto_preview = true,
+		auto_close = true, -- close once the list is empty
 		modes = {
 			-- A symbol outline docked to the right, which is the "where am I in
 			-- this file" view. Replaces needing a separate outline plugin.

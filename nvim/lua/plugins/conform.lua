@@ -59,11 +59,6 @@ return {
 				spotless_gradle = {
 					condition = pom_or_gradle_has_spotless("gradlew", { "build.gradle", "build.gradle.kts" }),
 				},
-				-- Respect a project's own prettier config; only fall back to
-				-- prettier's defaults when the project has none.
-				prettierd = {
-					require_cwd = false,
-				},
 			},
 			formatters_by_ft = {
 				-- JS / TS / React

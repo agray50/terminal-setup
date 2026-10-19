@@ -28,6 +28,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 pass() { echo -e "  ${GREEN}✓${NC} $1"; }
 fail() { echo -e "  ${RED}✗${NC} $1"; FAILURES=$((FAILURES + 1)); }
 warn() { echo -e "  ${YELLOW}!${NC} $1"; }
+indent() { sed 's/^/      /'; }
 head1() { echo -e "\n${BLUE}=== $1 ===${NC}"; }
 
 FAILURES=0
@@ -38,14 +39,24 @@ ONLY="${1:-all}"
 # -----------------------------------------------------------------------------
 check_lua() {
     head1 "Lua"
-    local bad=0
-    while IFS= read -r f; do
-        if ! nvim --headless -c "lua local ok,e=loadfile('$f'); if not ok then io.stderr:write(tostring(e)) ; vim.cmd('cq') end" -c qa 2>>"$WORK/lua.err"; then
-            fail "syntax error in $f"
-            bad=1
-        fi
-    done < <(find "$REPO/nvim" -name '*.lua' | sort)
-    [[ $bad -eq 0 ]] && pass "all Lua files parse"
+    # One nvim parses every file (`-l` runs a script without loading the
+    # config); one process per file cost ~2s for no extra coverage.
+    cat > "$WORK/parse.lua" <<'LUAEOF'
+for _, f in ipairs(arg) do
+	local ok, e = loadfile(f)
+	if not ok then
+		print(e)
+	end
+end
+LUAEOF
+    local errs
+    errs=$(find "$REPO/nvim" -name '*.lua' -print0 | xargs -0 nvim -l "$WORK/parse.lua" 2>&1)
+    if [[ -n "$errs" ]]; then
+        fail "Lua syntax errors:"
+        indent <<<"$errs"
+    else
+        pass "all Lua files parse"
+    fi
 
     local stylua="$HOME/.local/share/nvim/mason/bin/stylua"
     if [[ -x "$stylua" ]]; then
@@ -123,10 +134,20 @@ check_lockfile() {
         fail "mason-pin.lua is stale: lock=$want generated=$have — run ./setup.sh"
     fi
 
-    # Nothing in the install path may resolve a version from the network.
-    if grep -nE '^\s*[a-z_]+\(\)' "$REPO/setup.sh" >/dev/null && \
-       awk '/^do_update\(\)/{u=1} /^resolve_latest\(\)/{u=1} /^resolver_for\(\)/{u=1} /^github_latest|^mason_latest/{u=1} /^install_|^setup_/{u=0} u==0 && /github_latest_tag|mason_latest_registry|github_latest_commit/{print NR": "$0}' "$REPO/setup.sh" | grep -q .; then
-        fail "install path resolves versions from the network (should only happen in --update)"
+    # Nothing in the install path may resolve a version from the network: the
+    # network resolvers are called only by resolve_latest, and resolve_latest*
+    # only by do_update (--update). Tracks the enclosing function by its
+    # definition line, so it holds wherever the functions live.
+    local leaks
+    leaks=$(find "$REPO/setup.sh" "$REPO/lib" -name '*.sh' 2>/dev/null | sort | xargs awk '
+        /^[A-Za-z_][A-Za-z0-9_]*\(\)/ { fn = $0; sub(/\(.*/, "", fn); next }
+        /^[[:space:]]*#/ { next }
+        /(^|[^A-Za-z0-9_])(github_latest_tag|github_latest_tag_only|github_latest_commit|mason_latest_registry)([^A-Za-z0-9_]|$)/ && fn != "resolve_latest" { print FILENAME ":" FNR ": " fn }
+        /(^|[^A-Za-z0-9_])resolve_latest(_in_series)?([^A-Za-z0-9_]|$)/ && fn != "do_update" { print FILENAME ":" FNR ": " fn }
+    ')
+    if [[ -n "$leaks" ]]; then
+        fail "versions resolved from the network outside --update:"
+        indent <<<"$leaks"
     else
         pass "install path never resolves versions from the network"
     fi

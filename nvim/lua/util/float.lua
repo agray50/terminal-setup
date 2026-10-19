@@ -40,7 +40,7 @@ local function hide(t)
 end
 
 ---Open or focus a named floating terminal.
----@param opts { name: string, cmd: string|string[], scale: number?, title: string?, on_exit: fun()? }
+---@param opts { name: string, cmd: string|string[], scale: number?, title: string? }
 function M.toggle(opts)
 	local name = opts.name
 	local scale = opts.scale or 0.9
@@ -98,48 +98,19 @@ function M.toggle(opts)
 						end
 						terms[name] = nil
 					end
-					if opts.on_exit then
-						opts.on_exit()
-					end
 				end)
 			end,
 		})
-
-		-- q closes the float for read-only viewers; interactive TUIs like
-		-- lazygit need every key, so only bind it when asked.
-		if opts.close_on_q then
-			vim.keymap.set("n", "q", function()
-				M.toggle({ name = name, cmd = opts.cmd })
-			end, { buffer = t.buf, nowait = true, desc = "Close " .. name })
-		end
 	end
 
 	vim.cmd.startinsert()
 end
 
----Close a named terminal if it is open. Used by the "close all panels" keymap.
-function M.close(name)
-	local t = terms[name]
-	if t then
+---Close every open floating terminal. Used by the "close all panels" keymap.
+function M.close_all()
+	for _, t in pairs(terms) do
 		hide(t)
 	end
-end
-
----Close every open floating terminal.
-function M.close_all()
-	for name, _ in pairs(terms) do
-		M.close(name)
-	end
-end
-
----True if any float managed here is currently visible.
-function M.any_open()
-	for _, t in pairs(terms) do
-		if is_open(t) then
-			return true
-		end
-	end
-	return false
 end
 
 return M

@@ -48,19 +48,6 @@ return {
 			{ "<leader>w", group = "window", icon = { icon = "󰖮 ", color = "cyan" } },
 			{ "<leader>x", group = "diagnostics / lists", icon = { icon = "󰅚 ", color = "red" } },
 
-			-- Standalone leader keys, so the top-level menu has no bare entries.
-			{ "<leader><space>", desc = "󰈞 Find files" },
-			{ "<leader>/", desc = "󰱼 Grep project" },
-			{ "<leader>,", desc = "󰓩 Buffers" },
-			{ "<leader>?", desc = "󰌌 Buffer-local keymaps" },
-			{ "<leader>y", desc = "Yank to system clipboard" },
-			{ "<leader>Y", desc = "Yank line to system clipboard" },
-			{ "<leader>p", desc = "Paste without yanking replaced" },
-			{ "<leader>P", desc = "Paste from system clipboard" },
-			{ "<leader>X", desc = "Delete without yanking" },
-			{ "<leader>j", desc = "󱐋 Flash jump" },
-			{ "<leader>J", desc = "󱐋 Flash treesitter select" },
-
 			-- Document the non-leader keys that aren't self-evident. These
 			-- appear when you press the prefix, so ] and [ become discoverable
 			-- instead of needing to be memorised.

@@ -167,7 +167,6 @@ return {
 				changedelete = { text = "▎" },
 				untracked = { text = "▎" },
 			},
-			signs_staged_enable = true,
 			current_line_blame_opts = {
 				delay = 300,
 				virt_text_pos = "eol",

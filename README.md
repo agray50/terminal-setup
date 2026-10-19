@@ -508,7 +508,7 @@ and lint produces diagnostics.
 | YAML / Kubernetes | `yamlls` + SchemaStore | prettierd | yamllint | — |
 | Helm | `helm_ls` | (whitespace only²) | — | — |
 | CSS / SCSS / Tailwind | `cssls`, `tailwindcss`, `emmet` | prettierd | (LSP) | — |
-| Dockerfile | `docker_language_server` | — | hadolint | — |
+| Dockerfile | `dockerls` | — | hadolint | — |
 | SQL | `sqls`³ | sql-formatter | — | — |
 | TOML | `taplo` | taplo | — | — |
 | Markdown | `marksman` | prettierd | markdownlint-cli2 | — |
