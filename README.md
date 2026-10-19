@@ -21,7 +21,7 @@ Upgrades are a deliberate, reviewable step — see [Updating](#updating).
 
 ### Prerequisites
 
-Needs `git`, `curl` and `perl`. `make` is optional (only for building Python via pyenv).
+Needs `git` and `curl`. `make` is optional (only for building Python via pyenv).
 
 **macOS** — Homebrew is installed automatically if missing:
 ```bash
@@ -30,12 +30,12 @@ xcode-select --install
 
 **Linux (Debian/Ubuntu)**:
 ```bash
-sudo apt-get install -y git curl perl build-essential
+sudo apt-get install -y git curl build-essential
 ```
 
 **Linux (Fedora/RHEL)**:
 ```bash
-sudo dnf install -y git curl perl make gcc
+sudo dnf install -y git curl make gcc
 ```
 
 ### Install
@@ -229,7 +229,7 @@ nvim/
 ├── init.lua              bootstrap + lazy.nvim setup
 ├── lua/core/             options, keymaps, autocmds (no plugin dependencies)
 ├── lua/plugins/          one file per concern, each a lazy.nvim spec
-├── lua/util/             float terminals, tool-panel registry
+├── lua/util/             float terminals, tool-panel registry, toggles
 ├── lua/mason-pin.lua     GENERATED from versions.lock — do not edit
 └── lazy-lock.json        plugin version lock
 ```

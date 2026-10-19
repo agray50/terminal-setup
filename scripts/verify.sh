@@ -24,6 +24,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Shared with setup.sh (git_version_at_least). Sourced before the helpers below
+# so this script's own pass/fail/warn output format wins.
+# shellcheck source=../lib/common.sh
+source "$REPO/lib/common.sh"
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 pass() { echo -e "  ${GREEN}✓${NC} $1"; }
 fail() { echo -e "  ${RED}✗${NC} $1"; FAILURES=$((FAILURES + 1)); }
@@ -75,26 +80,33 @@ LUAEOF
 # -----------------------------------------------------------------------------
 check_shell() {
     head1 "Shell"
-    # setup.sh must parse under bash 3.2 — macOS still ships it as /bin/bash and
-    # setup.sh has to bootstrap before it can install anything newer.
-    if /bin/bash -n "$REPO/setup.sh" 2>/dev/null; then
-        pass "setup.sh parses under bash $(/bin/bash --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+    # setup.sh and its lib/ must parse under bash 3.2 — macOS still ships it as
+    # /bin/bash and setup.sh has to bootstrap before it can install anything
+    # newer. `bash -n` does not follow `source`, so each file is checked itself.
+    local -a files=("$REPO/setup.sh" "$REPO"/lib/*.sh)
+    local f bad32="" bad=""
+    for f in "${files[@]}"; do
+        /bin/bash -n "$f" 2>/dev/null || bad32="$bad32 ${f#"$REPO"/}"
+        bash -n "$f" 2>/dev/null || bad="$bad ${f#"$REPO"/}"
+    done
+    if [[ -z "$bad32" ]]; then
+        pass "${#files[@]} files parse under bash $(/bin/bash --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)"
     else
-        fail "setup.sh does NOT parse under /bin/bash (bash 3.2 compatibility broken)"
+        fail "does NOT parse under /bin/bash (bash 3.2 compatibility broken):$bad32"
     fi
-    if bash -n "$REPO/setup.sh" 2>/dev/null; then
-        pass "setup.sh parses under current bash"
+    if [[ -z "$bad" ]]; then
+        pass "${#files[@]} files parse under current bash"
     else
-        fail "setup.sh syntax error"
+        fail "syntax error:$bad"
     fi
 
-    local sc="$HOME/.local/share/nvim/mason/bin/shellcheck"
+    local sc="$HOME/.local/share/nvim/mason/bin/shellcheck" findings
     if [[ -x "$sc" ]]; then
-        if "$sc" -S warning "$REPO/setup.sh" "$REPO/scripts/verify.sh" >/dev/null 2>&1; then
+        if findings=$("$sc" -x -S warning "${files[@]}" "$REPO/scripts/verify.sh" 2>&1); then
             pass "shellcheck clean"
         else
             fail "shellcheck findings:"
-            "$sc" -S warning "$REPO/setup.sh" "$REPO/scripts/verify.sh" 2>&1 | sed 's/^/      /' | head -20
+            indent <<<"$findings" | head -20
         fi
     else
         warn "shellcheck not installed; skipping"
@@ -302,7 +314,7 @@ check_gitconfig_compat() {
         return
     fi
     local want
-    if git_version_at_least_check 2.35; then want="zdiff3"; else want="diff3"; fi
+    if git_version_at_least 2.35; then want="zdiff3"; else want="diff3"; fi
     if grep -qE "^[[:space:]]*conflictstyle = ${want}$" "$local_cfg"; then
         pass "gitconfig.local matches local git ($(git --version | sed -n 's/^git version //p')): conflictstyle=${want}"
     else
@@ -316,18 +328,6 @@ check_gitconfig_compat() {
         fail "git errors reading the config:"
         git -C "$REPO" status 2>&1 | sed 's/^/      /' | head -3
     fi
-}
-
-git_version_at_least_check() {
-    local want="$1" have
-    have=$(git --version 2>/dev/null | sed -n 's/^git version \([0-9.]*\).*/\1/p')
-    [[ -z "$have" ]] && return 1
-    local wM wm hM hm
-    wM="${want%%.*}"; wm="${want#*.}"; wm="${wm%%.*}"
-    hM="${have%%.*}"; hm="${have#*.}"; hm="${hm%%.*}"
-    [[ "$hM" -gt "$wM" ]] && return 0
-    [[ "$hM" -lt "$wM" ]] && return 1
-    [[ "$hm" -ge "$wm" ]]
 }
 
 # -----------------------------------------------------------------------------
@@ -473,8 +473,8 @@ LUAEOF
 # `node`, `python3`, `go` and eight other everyday commands recursed until zsh
 # ran out of stack.
 #
-# Two properties are asserted, both read straight out of setup.sh so this tests
-# what a *fresh* machine gets rather than whatever is in the current ~/.zshrc:
+# Two properties are asserted, against `./setup.sh --print-block <tool>` so this
+# tests what a *fresh* machine gets rather than whatever is in ~/.zshrc now:
 #
 #   1. No stub can recurse, even with every helper it might rely on deleted and
 #      with the real binary absent from PATH.
@@ -495,15 +495,9 @@ check_shell_init() {
     local tool block
     for tool in nvm pyenv goenv; do
         block="$WORK/$tool.zsh"
-        # Pull the heredoc body for this tool's add_block call out of setup.sh.
-        awk -v t="$tool" '
-            $0 == "    add_block \"" t "\" \"${HOME}/.zshrc\" <<'\''BLOCK_EOF'\''" { inblk = 1; next }
-            inblk && $0 == "BLOCK_EOF" { exit }
-            inblk { print }
-        ' "$REPO/setup.sh" > "$block"
-
-        if [[ ! -s "$block" ]]; then
-            fail "$tool: could not extract its block from setup.sh"
+        # Exactly what setup.sh writes into a fresh ~/.zshrc.
+        if ! "$REPO/setup.sh" --print-block "$tool" > "$block" 2>/dev/null || [[ ! -s "$block" ]]; then
+            fail "$tool: ./setup.sh --print-block $tool produced nothing"
             continue
         fi
 

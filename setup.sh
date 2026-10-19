@@ -36,13 +36,19 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 DRY_RUN=false
-MODE="install"   # install | update | check
+MODE="install"   # install | update | check | print-block
+PRINT_BLOCK=""
 
-for arg in "$@"; do
-    case "$arg" in
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --dry-run) DRY_RUN=true ;;
         --update)  MODE="update" ;;
         --check)   MODE="check" ;;
+        --print-block)
+            MODE="print-block"
+            PRINT_BLOCK="${2:-}"
+            shift
+            ;;
         --help|-h)
             cat <<'USAGE'
 Usage: ./setup.sh [OPTION]
@@ -58,6 +64,10 @@ Usage: ./setup.sh [OPTION]
 
   --dry-run     Show what would be installed/changed without changing anything.
 
+  --print-block <nvm|pyenv|goenv>
+                Print the managed ~/.zshrc block for a version manager, exactly
+                as a fresh install writes it (scripts/verify.sh tests these).
+
   --help, -h    Show this message.
 
 Roll back an update with:  git checkout versions.lock && ./setup.sh
@@ -65,459 +75,16 @@ USAGE
             exit 0
             ;;
     esac
+    shift
 done
 
-# -----------------------------------------------------------------------------
-# Logging
-# -----------------------------------------------------------------------------
-
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
-
-info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
-success() { echo -e "${GREEN}[OK]${NC} $1"; }
-warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error()   { echo -e "${RED}[ERROR]${NC} $1" >&2; }
-manual()  { echo -e "${CYAN}[MANUAL]${NC} $1"; MANUAL_STEPS+=("$1"); }
-
-# -----------------------------------------------------------------------------
-# Version lock
-# -----------------------------------------------------------------------------
-# versions.lock is a flat KEY=value file. Parsed rather than sourced so a stray
-# line in the lock file can never execute arbitrary code.
-
-# NOTE: deliberately no associative arrays here. macOS still ships bash 3.2 as
-# /bin/bash, and this script has to bootstrap on a fresh machine *before*
-# install_bash has upgraded it — so nothing in this file may use bash 4+ syntax.
-# Pins are therefore read straight from the lockfile on demand; it has ~25
-# entries, so the cost is irrelevant.
-
-load_lockfile() {
-    if [[ ! -f "$LOCKFILE" ]]; then
-        error "versions.lock not found at $LOCKFILE"
-        echo "  This file pins every tool version. Restore it with: git checkout versions.lock"
-        exit 1
-    fi
-    local count
-    count=$(grep -cE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "$LOCKFILE" || true)
-    if [[ "${count:-0}" -eq 0 ]]; then
-        error "versions.lock contains no KEY=value entries — it may be corrupt"
-        exit 1
-    fi
-    info "Loaded ${count} pinned versions from versions.lock"
-}
-
-# Read a pin, failing loudly rather than silently installing something unpinned.
-# Matches the first `KEY=value` line, ignoring comments and surrounding space.
-pin() {
-    local key="$1" value
-    value=$(pin_optional "$key")
-    if [[ -z "$value" ]]; then
-        error "versions.lock is missing required key: $key"
-        exit 1
-    fi
-    printf '%s\n' "$value"
-}
-
-# The same lookup for keys that may legitimately be absent (e.g. <KEY>_CONSTRAINT).
-pin_optional() {
-    sed -n "s/^[[:space:]]*${1}[[:space:]]*=[[:space:]]*\\([^#]*\\).*/\\1/p" "$LOCKFILE" \
-        | head -1 \
-        | sed 's/[[:space:]]*$//'
-}
-
-# -----------------------------------------------------------------------------
-# System Detection
-# -----------------------------------------------------------------------------
-
-detect_os() {
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        echo "macos"
-    elif [[ -f /etc/os-release ]]; then
-        local ids
-        ids="$(. /etc/os-release; echo "${ID:-} ${ID_LIKE:-}")"
-        case "$ids" in
-            *ubuntu*|*debian*) echo "debian" ;;
-            *fedora*|*rhel*|*centos*) echo "fedora" ;;
-            *arch*|*manjaro*) echo "arch" ;;
-            *) echo "linux" ;;
-        esac
-    else
-        echo "linux"
-    fi
-}
-
-# Normalised arch: x86_64 or arm64 (used for neovim / k9s / jq / yq release filenames)
-detect_arch() {
-    case "$(uname -m)" in
-        x86_64)        echo "x86_64" ;;
-        aarch64|arm64) echo "arm64" ;;
-        *)             uname -m ;;
-    esac
-}
-
-# Detected once: these used to be re-derived on every use (detect_os alone ran
-# 17 times per install, re-sourcing /etc/os-release each time on Linux).
-OS=$(detect_os)
-ARCH=$(detect_arch)
-
-# Pick the spelling a release uses for this platform. Every project names
-# platforms differently (Darwin/darwin/macos, amd64/x86_64), so each caller
-# passes its own: `$(by_os Darwin Linux)_$(by_arch amd64 arm64)`.
-by_os()   { if [[ "$OS" == "macos" ]]; then echo "$1"; else echo "$2"; fi; }
-by_arch() { if [[ "$ARCH" == "x86_64" ]]; then echo "$1"; else echo "$2"; fi; }
-
-# Rust target triple (ripgrep/fd/bat/delta release filenames).
-RUST_TARGET="$(by_arch x86_64 aarch64)-$(by_os apple-darwin unknown-linux-musl)"
-
-# -----------------------------------------------------------------------------
-# Utilities
-# -----------------------------------------------------------------------------
-
-command_exists() { command -v "$1" >/dev/null 2>&1; }
-
-# Install a Homebrew formula unless it is already installed.
-brew_ensure() {
-    brew list "$1" &>/dev/null || run brew install "$1"
-}
-
-# In --dry-run mode, log what would happen and succeed; otherwise fail, so the
-# caller carries on:   dry_skip "would do X" && return 0
-dry_skip() {
-    $DRY_RUN || return 1
-    info "[dry-run] $1"
-}
-
-# Execute (or, in --dry-run mode, just log) a mutating command
-run() {
-    if $DRY_RUN; then
-        info "[dry-run] would run: $*"
-    else
-        "$@"
-    fi
-}
-
-# Append line to file only if not already present
-add_line() {
-    if grep -qF "$1" "$2" 2>/dev/null; then
-        return 0
-    elif $DRY_RUN; then
-        info "[dry-run] would append to $2: $1"
-    else
-        echo "$1" >> "$2"
-    fi
-}
-
-# Write a managed block into a file, replacing it if it already exists.
-#
-# Each block is wrapped in explicit delimiters:
-#
-#     # >>> terminal-setup: <name> >>>
-#     ...content...
-#     # <<< terminal-setup: <name> <<<
-#
-# and the whole region is REGENERATED on every run. This replaces the previous
-# marker-only append, which could not distinguish "my block is already
-# installed" from "a stale or partially-damaged block with the same header is
-# installed" — the cause of two separate bugs: legacy eager `goenv init -`
-# blocks suppressing the lazy replacement (so goenv was never on PATH), and a
-# migration step later stripping export lines out of a freshly written block.
-#
-# Content comes from STDIN:
-#
-#     add_block "aliases" ~/.zshrc <<'EOF'
-#     ...
-#     EOF
-#
-# Deliberately not `"$(cat <<'EOF' ...)"`: bash 3.2 — still /bin/bash on macOS,
-# which this script must bootstrap under — misparses a heredoc nested inside
-# command substitution.
-add_block() {
-    local name="$1" file="$2" content
-    content=$(cat)
-
-    local begin="# >>> terminal-setup: ${name} >>>"
-    local end="# <<< terminal-setup: ${name} <<<"
-
-    [[ -f "$file" ]] || touch "$file"
-
-    # Already present and byte-identical? Nothing to do.
-    if grep -qF "$begin" "$file" 2>/dev/null; then
-        local current
-        current=$(awk -v b="$begin" -v e="$end" '
-            $0 == b { inblk = 1; next }
-            $0 == e { inblk = 0; next }
-            inblk   { print }
-        ' "$file")
-        if [[ "$current" == "$content" ]]; then
-            return 0
-        fi
-        dry_skip "would UPDATE managed block '${name}' in $file" && return 0
-        # Replace the region in place, preserving its position in the file.
-        # The content is staged in a temp file because awk reads it with
-        # getline, which cannot take it on stdin alongside the target file.
-        local tmp blockfile
-        tmp=$(mktemp "$WORK/tmp.XXXXXX")
-        blockfile=$(mktemp "$WORK/tmp.XXXXXX")
-        printf '%s\n' "$content" > "$blockfile"
-        awk -v b="$begin" -v e="$end" -v f="$blockfile" '
-            $0 == b { print; while ((getline line < f) > 0) print line; close(f); skip = 1; next }
-            $0 == e { print; skip = 0; next }
-            !skip   { print }
-        ' "$file" > "$tmp"
-        mv "$tmp" "$file"
-        rm -f "$blockfile"
-        info "Updated managed block '${name}'"
-        return 0
-    fi
-
-    dry_skip "would append managed block '${name}' to $file" && return 0
-    {
-        printf '\n%s\n' "$begin"
-        printf '%s\n' "$content"
-        printf '%s\n' "$end"
-    } >> "$file"
-}
-
-# Print only the lines of a file that are OUTSIDE "# >>> terminal-setup:"
-# regions. Detection of legacy blocks has to run against this rather than the
-# whole file: several of the legacy headers we look for are byte-identical to
-# the first content line of the blocks this script itself writes.
-unmanaged_region() {
-    awk '
-        /^# >>> terminal-setup:/ { managed = 1; next }
-        /^# <<< terminal-setup:/ { managed = 0; next }
-        !managed { print }
-    ' "$1"
-}
-
-backup_if_exists() {
-    [[ -e "$1" ]] || return 0
-    dry_skip "would back up $1 to $BACKUP_DIR" && return 0
-    mkdir -p "$BACKUP_DIR"
-    cp -r "$1" "$BACKUP_DIR/$(basename "$1")"
-    info "Backed up $1"
-}
-
-# Backups accumulate one directory per changed file per run. That was a real
-# problem while migrate_legacy_zshrc was rewriting ~/.zshrc on every run (53
-# directories had built up, 38 of them byte-identical); with that fixed, a new
-# directory appears only when something genuinely changed.
-#
-# So this warns rather than deletes. An installer should not quietly discard
-# the user's own config history, and the *oldest* snapshot — the pre-setup
-# original — is the one most worth keeping, which is exactly what a naive
-# "keep the newest N" would throw away first.
-warn_stale_backups() {
-    local root="${HOME}/.config-backups" count
-    [[ -d "$root" ]] || return 0
-    count=$(find "$root" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
-    if [[ "$count" -gt "$BACKUP_WARN_AT" ]]; then
-        warn "${count} config snapshots in ${root} — delete the ones you no longer need."
-    fi
-    return 0
-}
-
-# Resolve latest release tag from a GitHub repo (e.g. "v1.2.3" or "14.1.1").
-# ONLY called by --update. The install path never resolves versions.
-github_latest_tag() {
-    curl -fsLI --retry 2 --retry-delay 1 --retry-connrefused \
-        "https://github.com/$1/releases/latest" -o /dev/null -w '%{url_effective}' 2>/dev/null \
-        | sed 's|.*/tag/||'
-}
-
-# Latest tag (not release) — for repos that tag but never publish releases.
-github_latest_tag_only() {
-    curl -fsL --retry 2 --retry-delay 1 --retry-connrefused \
-        "https://api.github.com/repos/$1/tags?per_page=1" 2>/dev/null \
-        | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
-}
-
-# Latest commit SHA on the default branch — for repos with no tags at all.
-github_latest_commit() {
-    curl -fsL --retry 2 --retry-delay 1 --retry-connrefused \
-        "https://api.github.com/repos/$1/commits?per_page=1" 2>/dev/null \
-        | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
-}
-
-# Latest mason-registry snapshot tag.
-mason_latest_registry() {
-    curl -fsL --retry 2 --retry-delay 1 --retry-connrefused \
-        "https://api.github.com/repos/mason-org/mason-registry/releases?per_page=1" 2>/dev/null \
-        | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
-}
-
-# The version line of a tool this script installs into LOCAL_BIN, or nothing
-# if it is absent. One probe for the installers and --check, which used to type
-# their own and disagree: --check asked $PATH, the installers asked LOCAL_BIN.
-installed_version() {
-    local bin="$LOCAL_BIN/$1"
-    [[ -x "$bin" ]] || return 0
-    case "$1" in
-        jq)  "$bin" --version 2>/dev/null || true ;;
-        k9s) "$bin" version 2>/dev/null | grep -i 'Version:' | head -1 || true ;;
-        eza) "$bin" --version 2>/dev/null | sed -n 2p || true ;;
-        *)   "$bin" --version 2>/dev/null | head -1 || true ;;
-    esac
-}
-
-# Does an installed version line contain the pinned version? Tags carry a
-# leading `v` (jq's `jq-`) that version output usually doesn't.
-version_matches() {
-    local want="${1#v}"
-    want="${want#jq-}"
-    [[ "$2" == *"$want"* ]]
-}
-
-# The first dotted version number in a line ("ripgrep 15.2.0 (rev …)" -> 15.2.0).
-bare_version() {
-    local re='[0-9][0-9.]*[0-9]'
-    [[ "$1" =~ $re ]] && printf '%s' "${BASH_REMATCH[0]}"
-    return 0
-}
-
-# Compare a pinned tag against an installed version string.
-# Returns 0 (skip — already correct) or 1 (install/update needed).
-at_pinned_version() {
-    local name="$1" pinned_tag="$2" installed="$3"
-    if [[ -z "$installed" ]]; then
-        info "Installing ${name} ${pinned_tag}..."
-        return 1
-    fi
-    if version_matches "$pinned_tag" "$installed"; then
-        success "${name} ${pinned_tag} — pinned, up to date"
-        return 0
-    fi
-    local cur; cur=$(bare_version "$installed")
-    info "Changing ${name}: ${cur:-unknown} → ${pinned_tag} (pinned)"
-    return 1
-}
-
-# In-place sed that works on both GNU (Linux) and BSD (macOS) sed
-sed_inplace() {
-    local expr="$1" file="$2"
-    dry_skip "would edit $file: $expr" && return 0
-    if [[ "$OS" == "macos" ]]; then
-        sed -i '' "$expr" "$file"
-    else
-        sed -i "$expr" "$file"
-    fi
-}
-
-# Clone (or move an existing clone) to an exact tag/commit, detached.
-# Replaces the old `git pull` pattern, which tracked moving branches and was
-# the main reason a working setup would break without anything changing locally.
-clone_at_tag() {
-    local url="$1" dir="$2" ref="$3"
-    local name="${4:-$(basename "$dir")}"
-
-    if [[ -d "$dir/.git" ]]; then
-        local current
-        current=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo "")
-        # Already exactly at the requested ref?
-        if [[ "$current" == "$ref"* ]]; then
-            success "${name} @ ${ref:0:12} — pinned, up to date"
-            return 0
-        fi
-        local resolved
-        resolved=$(git -C "$dir" rev-parse "refs/tags/${ref}^{commit}" 2>/dev/null || echo "")
-        if [[ -n "$resolved" && "$current" == "$resolved" ]]; then
-            success "${name} @ ${ref} — pinned, up to date"
-            return 0
-        fi
-    fi
-
-    dry_skip "would check out ${name} at ${ref} in $dir" && return 0
-
-    if [[ ! -d "$dir/.git" ]]; then
-        rm -rf "$dir"
-        git clone --quiet --filter=blob:none "$url" "$dir"
-    fi
-
-    git -C "$dir" fetch --quiet --tags --force origin || true
-    # A 40-char hex string is a commit SHA; anything else is a tag.
-    if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
-        git -C "$dir" fetch --quiet origin "$ref" 2>/dev/null || true
-    fi
-    if git -C "$dir" checkout --quiet --detach "$ref" 2>/dev/null; then
-        success "${name} @ ${ref} — checked out"
-    else
-        warn "${name}: could not check out ref '${ref}' — leaving as-is"
-    fi
-}
-
-# -----------------------------------------------------------------------------
-# Package Manager (used only for tools without viable binary releases)
-# -----------------------------------------------------------------------------
-
-pkg_install() {
-    local pkg="$1" os="${2:-$OS}"
-    dry_skip "would install package '$pkg' via ${os}'s package manager" && return 0
-    case "$os" in
-        macos)   brew install "$pkg" ;;
-        debian)  sudo apt-get install -y "$pkg" ;;
-        fedora)  sudo dnf install -y "$pkg" ;;
-        arch)    sudo pacman -S --noconfirm "$pkg" ;;
-        *)       manual "Install '$pkg' using your system package manager" ;;
-    esac
-}
-
-# -----------------------------------------------------------------------------
-# Binary Download Helpers
-# -----------------------------------------------------------------------------
-
-# Download a .tar.gz archive, find a named binary inside, install to LOCAL_BIN
-install_from_tarball() {
-    local url="$1" binary="$2"
-    dry_skip "would download and install '$binary' from $url" && return 0
-
-    local tmpdir
-    tmpdir=$(mktemp -d "$WORK/dir.XXXXXX")
-
-    curl -fsSL "$url" -o "$tmpdir/archive.tar.gz"
-    tar -xzf "$tmpdir/archive.tar.gz" -C "$tmpdir"
-
-    local bin_path
-    bin_path=$(find "$tmpdir" -name "$binary" -type f -perm -u+x | head -1)
-    [[ -z "$bin_path" ]] && bin_path=$(find "$tmpdir" -name "$binary" -type f | head -1)
-
-    if [[ -z "$bin_path" ]]; then
-        rm -rf "$tmpdir"
-        error "Could not find '$binary' in archive: $url"
-        return 1
-    fi
-
-    cp "$bin_path" "$LOCAL_BIN/$binary"
-    chmod 755 "$LOCAL_BIN/$binary"
-    rm -rf "$tmpdir"
-}
-
-# Install a pinned release binary into LOCAL_BIN unless it is already at the
-# pin. The URL is a template: {tag} is the pinned tag, {ver} the tag without its
-# leading `v`, {target} the Rust triple. An archive (.tar.gz) is unpacked and
-# searched for <bin>; anything else is the binary itself.
-install_release() {
-    local bin="$1" key="$2" url="$3" tag
-    info "=== ${bin} ==="
-    tag=$(pin "$key")
-    at_pinned_version "$bin" "$tag" "$(installed_version "$bin")" && return 0
-    url=${url//\{tag\}/$tag}
-    url=${url//\{ver\}/${tag#v}}
-    url=${url//\{target\}/$RUST_TARGET}
-    case "$url" in
-        *.tar.gz) install_from_tarball "$url" "$bin" ;;
-        *)        install_from_binary_url "$url" "$bin" ;;
-    esac
-    success "${bin} ${tag} installed"
-}
-
-# Download a single binary file directly to LOCAL_BIN
-install_from_binary_url() {
-    local url="$1" binary="$2"
-    dry_skip "would download '$binary' from $url" && return 0
-    curl -fsSL "$url" -o "$LOCAL_BIN/$binary"
-    chmod 755 "$LOCAL_BIN/$binary"
-}
+# Helpers live in lib/: common.sh is everything an installer needs (logging,
+# pins, platform, file editing, downloads); versions.sh is the --update and
+# --check machinery, the only code here that talks to the network.
+# shellcheck source=lib/common.sh
+source "${SCRIPT_DIR}/lib/common.sh"
+# shellcheck source=lib/versions.sh
+source "${SCRIPT_DIR}/lib/versions.sh"
 
 # -----------------------------------------------------------------------------
 # Shell
@@ -869,24 +436,14 @@ install_tree_sitter_cli() {
     fi
 }
 
-install_nvm() {
-    info "=== nvm ==="
-    local tag; tag=$(pin NVM_VERSION)
-    if [[ -d "${HOME}/.nvm" ]]; then
-        success "nvm already installed (pinned ${tag})"
-    elif $DRY_RUN; then
-        info "[dry-run] would install nvm ${tag}"
-    else
-        curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/${tag}/install.sh" | bash
-        success "nvm ${tag} installed"
-    fi
-
-    # nvm's own installer appends an eager init block to .zshrc when $SHELL=zsh;
-    # migrate_legacy_zshrc removes it, since it both costs ~200ms per shell and
-    # fights the managed block below. The block itself splits the difference:
-    # PATH is set eagerly (cheap, and visible to non-shell consumers), while the
-    # nvm function is deferred to first use.
-    add_block "nvm" "${HOME}/.zshrc" <<'BLOCK_EOF'
+# The managed ~/.zshrc blocks for the version managers. A function rather than
+# inline heredocs so `./setup.sh --print-block <tool>` hands scripts/verify.sh
+# exactly what a fresh machine gets; it used to scrape this file's heredocs by
+# their literal text, indentation included, and broke on any refactor.
+zshrc_block() {
+    case "$1" in
+        nvm)
+            cat <<'BLOCK_EOF'
 # nvm (default Node on PATH eagerly; nvm itself lazy)
 export NVM_DIR="$HOME/.nvm"
 # Sourcing nvm.sh costs ~200ms on every shell start, and for anything that is
@@ -921,6 +478,66 @@ nvm() {
     nvm "$@"
 }
 BLOCK_EOF
+            ;;
+        pyenv) shim_manager_block pyenv PYENV_ROOT ;;
+        goenv) shim_manager_block goenv GOENV_ROOT "export GOENV_PATH_ORDER=front" ;;
+        *)
+            error "no managed block for '$1' (expected nvm, pyenv or goenv)"
+            return 1
+            ;;
+    esac
+}
+
+# pyenv and goenv work identically, so they share one block: <tool> <ROOT var>
+# [extra line]. Placeholders, not an unquoted heredoc, so the shell code below
+# reads exactly as it lands in ~/.zshrc.
+shim_manager_block() {
+    local tool="$1" root="$2" extra="${3:-}"
+    sed -e "s/@TOOL@/${tool}/g" -e "s/@ROOT@/${root}/g" <<'BLOCK_EOF' | awk -v x="$extra" '$0 == "@EXTRA@" { if (x != "") print x; next } { print }'
+# @TOOL@ (shims on PATH eagerly; shell integration lazy)
+export @ROOT@="$HOME/.@TOOL@"
+@EXTRA@
+# `@TOOL@ init -` forks @TOOL@ and evals its output on every shell start. For
+# anything that is not an interactive shell, all that output does is prepend
+# these two directories — so prepend them directly. This also fixes a real
+# correctness bug: with the shims reachable only through a shell function,
+# processes spawned without an rc file (nvim's language servers, debug
+# adapters, build tooling) silently got the system interpreter instead of the
+# @TOOL@-selected one.
+[[ -d $@ROOT@/bin ]] && export PATH="$@ROOT@/bin:$PATH"
+[[ -d $@ROOT@/shims ]] && export PATH="$@ROOT@/shims:$PATH"
+# Only `@TOOL@ shell` needs the shell function, so defer the full init to first
+# use of `@TOOL@` itself. The stub unsets itself *before* running init: if init
+# fails or @TOOL@ is missing, the call falls through to PATH rather than
+# re-entering this function forever. An earlier version put the unset in a
+# shared `_@TOOL@_lazy_load` helper, which turned python, go and friends into
+# fork bombs in any shell where that helper did not survive.
+@TOOL@() {
+    unset -f @TOOL@ 2>/dev/null
+    eval "$(command @TOOL@ init -)"
+    @TOOL@ "$@"
+}
+BLOCK_EOF
+}
+
+install_nvm() {
+    info "=== nvm ==="
+    local tag; tag=$(pin NVM_VERSION)
+    if [[ -d "${HOME}/.nvm" ]]; then
+        success "nvm already installed (pinned ${tag})"
+    elif $DRY_RUN; then
+        info "[dry-run] would install nvm ${tag}"
+    else
+        curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/${tag}/install.sh" | bash
+        success "nvm ${tag} installed"
+    fi
+
+    # nvm's own installer appends an eager init block to .zshrc when $SHELL=zsh;
+    # migrate_legacy_zshrc removes it, since it both costs ~200ms per shell and
+    # fights the managed block below. The block itself splits the difference:
+    # PATH is set eagerly (cheap, and visible to non-shell consumers), while the
+    # nvm function is deferred to first use.
+    add_block "nvm" "${HOME}/.zshrc" < <(zshrc_block nvm)
 }
 
 install_pyenv() {
@@ -931,29 +548,7 @@ install_pyenv() {
 
     # PATH eagerly, `pyenv init -` lazily — see the block's own comments for why
     # the shims have to be on PATH rather than behind a shell function.
-    add_block "pyenv" "${HOME}/.zshrc" <<'BLOCK_EOF'
-# pyenv (shims on PATH eagerly; shell integration lazy)
-export PYENV_ROOT="$HOME/.pyenv"
-# `pyenv init -` forks pyenv and evals its output on every shell start. For
-# anything that is not an interactive shell, all that output does is prepend
-# these two directories — so prepend them directly. This also fixes a real
-# correctness bug: with the shims reachable only through a shell function,
-# processes spawned without an rc file (nvim's language servers, debugpy, build
-# tooling) silently got the system Python instead of the pyenv-selected one.
-[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
-[[ -d $PYENV_ROOT/shims ]] && export PATH="$PYENV_ROOT/shims:$PATH"
-# `pyenv shell` is the only subcommand that needs the shell function, so defer
-# the full init to first use of `pyenv` itself. The stub unsets itself *before*
-# running init: if init fails or pyenv is missing, the call falls through to
-# PATH rather than re-entering this function forever. An earlier version put the
-# unset in a shared `_pyenv_lazy_load` helper, which turned python, python3, pip
-# and pip3 into fork bombs in any shell where that helper did not survive.
-pyenv() {
-    unset -f pyenv 2>/dev/null
-    eval "$(command pyenv init -)"
-    pyenv "$@"
-}
-BLOCK_EOF
+    add_block "pyenv" "${HOME}/.zshrc" < <(zshrc_block pyenv)
 
     # pyenv builds Python from source — surface the required packages per distro
     case "$OS" in
@@ -970,22 +565,8 @@ install_goenv() {
     info "=== goenv ==="
     clone_at_tag "https://github.com/go-nv/goenv.git" "${HOME}/.goenv" "$(pin GOENV_VERSION)" "goenv"
 
-    # PATH eagerly, `goenv init -` lazily — same reasoning as pyenv above.
-    add_block "goenv" "${HOME}/.zshrc" <<'BLOCK_EOF'
-# goenv (shims on PATH eagerly; shell integration lazy)
-export GOENV_ROOT="$HOME/.goenv"
-export GOENV_PATH_ORDER=front
-# Same reasoning as pyenv above: prepend the directories `goenv init -` would
-# have exported, so `go` resolves to the goenv-selected toolchain for every
-# consumer rather than only inside a shell function.
-[[ -d $GOENV_ROOT/bin ]] && export PATH="$GOENV_ROOT/bin:$PATH"
-[[ -d $GOENV_ROOT/shims ]] && export PATH="$GOENV_ROOT/shims:$PATH"
-goenv() {
-    unset -f goenv 2>/dev/null
-    eval "$(command goenv init -)"
-    goenv "$@"
-}
-BLOCK_EOF
+    # PATH eagerly, `goenv init -` lazily — same block as pyenv's.
+    add_block "goenv" "${HOME}/.zshrc" < <(zshrc_block goenv)
 
     # goenv downloads pre-built Go binaries but needs gcc/make for cgo-based tooling
     case "$OS" in
@@ -1477,23 +1058,6 @@ setup_gitconfig() {
     fi
 }
 
-# Is the installed git at least $1 (e.g. "2.35")? bash 3.2 safe: no arrays.
-git_version_at_least() {
-    local want="$1" have
-    have=$(git --version 2>/dev/null | sed -n 's/^git version \([0-9.]*\).*/\1/p')
-    [[ -z "$have" ]] && return 1
-
-    local want_major want_minor have_major have_minor
-    want_major="${want%%.*}"; want_minor="${want#*.}"; want_minor="${want_minor%%.*}"
-    have_major="${have%%.*}"; have_minor="${have#*.}"; have_minor="${have_minor%%.*}"
-    [[ -z "$want_minor" || "$want_minor" == "$want" ]] && want_minor=0
-    [[ -z "$have_minor" || "$have_minor" == "$have" ]] && have_minor=0
-
-    if [[ "$have_major" -gt "$want_major" ]]; then return 0; fi
-    if [[ "$have_major" -lt "$want_major" ]]; then return 1; fi
-    [[ "$have_minor" -ge "$want_minor" ]]
-}
-
 setup_gitconfig_version() {
     info "=== git config (version-gated) ==="
     # This repo is shared between machines with different git versions — macOS
@@ -1704,239 +1268,6 @@ setup_tmux_plugin_pins() {
 }
 
 # -----------------------------------------------------------------------------
-# --update : re-resolve every pinned version, rewrite versions.lock, install nothing
-# -----------------------------------------------------------------------------
-
-# Map of lock key -> how to resolve its latest value.
-# "release:<repo>" latest GitHub release tag
-# "tag:<repo>"     latest git tag (repos that tag but publish no releases)
-# "commit:<repo>"  latest commit SHA (repos with no tags at all)
-# "mason"          latest mason-registry snapshot
-# "manual"         never auto-resolved (explained inline)
-resolver_for() {
-    case "$1" in
-        NVIM_VERSION)                    echo "release:neovim/neovim" ;;
-        FZF_VERSION)                     echo "release:junegunn/fzf" ;;
-        RIPGREP_VERSION)                 echo "release:BurntSushi/ripgrep" ;;
-        FD_VERSION)                      echo "release:sharkdp/fd" ;;
-        BAT_VERSION)                     echo "release:sharkdp/bat" ;;
-        EZA_VERSION)                     echo "release:eza-community/eza" ;;
-        JQ_VERSION)                      echo "release:jqlang/jq" ;;
-        YQ_VERSION)                      echo "release:mikefarah/yq" ;;
-        K9S_VERSION)                     echo "release:derailed/k9s" ;;
-        LAZYGIT_VERSION)                 echo "release:jesseduffield/lazygit" ;;
-        DELTA_VERSION)                   echo "release:dandavison/delta" ;;
-        TREE_SITTER_CLI_VERSION)         echo "tag:tree-sitter/tree-sitter" ;;
-        OHMYZSH_COMMIT)                  echo "commit:ohmyzsh/ohmyzsh" ;;
-        P10K_VERSION)                    echo "release:romkatv/powerlevel10k" ;;
-        ZSH_SYNTAX_HIGHLIGHTING_VERSION) echo "tag:zsh-users/zsh-syntax-highlighting" ;;
-        ZSH_AUTOSUGGESTIONS_VERSION)     echo "tag:zsh-users/zsh-autosuggestions" ;;
-        TPM_VERSION)                     echo "tag:tmux-plugins/tpm" ;;
-        TMUX_NAVIGATOR_COMMIT)           echo "commit:christoomey/vim-tmux-navigator" ;;
-        CATPPUCCIN_TMUX_VERSION)         echo "release:catppuccin/tmux" ;;
-        TMUX_CPU_COMMIT)                 echo "commit:tmux-plugins/tmux-cpu" ;;
-        NVM_VERSION)                     echo "release:nvm-sh/nvm" ;;
-        PYENV_VERSION)                   echo "release:pyenv/pyenv" ;;
-        GOENV_VERSION)                   echo "release:go-nv/goenv" ;;
-        TFENV_VERSION)                   echo "release:tfutils/tfenv" ;;
-        MASON_REGISTRY)                  echo "mason" ;;
-        *)                               echo "manual" ;;
-    esac
-}
-
-# Newest tag matching a version-series prefix (e.g. "2." for goenv 2.x).
-# Checks tags rather than releases, since a maintained older series often has
-# tags without GitHub release entries.
-resolve_latest_in_series() {
-    local spec="$1" prefix="$2" repo tag
-    repo="${spec#*:}"
-    # Exact prefix match via `case`, NOT grep: the constraint contains a literal
-    # "." which grep would treat as "any character", so "2." also matched the
-    # ancient date-based tag "v20161215".
-    curl -fsL --retry 2 --retry-delay 1 --retry-connrefused \
-        "https://api.github.com/repos/${repo}/tags?per_page=100" 2>/dev/null \
-        | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-        | while IFS= read -r tag; do
-            case "${tag#v}" in
-                "${prefix}"*) printf '%s\n' "$tag" ;;
-            esac
-        done \
-        | sed 's/^v//' \
-        | sort -t. -k1,1n -k2,2n -k3,3n \
-        | tail -1
-}
-
-# Every resolver above is a `curl | sed` pipeline and this script runs under
-# `set -euo pipefail`, so `latest=$(resolve_latest ...)` propagated curl's exit
-# status: one transient failure part-way through --update (curl 56, "failure
-# receiving network data", observed against GitHub mid-run) aborted the entire
-# run with a bare exit code, no message, and versions.lock untouched. Swallow
-# the status and return an empty string instead — do_update already treats ""
-# as unresolved, keeps the existing pin, warns, and counts it.
-resolve_latest() {
-    local spec="$1" kind repo out=""
-    kind="${spec%%:*}"
-    repo="${spec#*:}"
-    case "$kind" in
-        release) out=$(github_latest_tag "$repo" || true) ;;
-        tag)     out=$(github_latest_tag_only "$repo" || true) ;;
-        commit)  out=$(github_latest_commit "$repo" || true) ;;
-        mason)   out=$(mason_latest_registry || true) ;;
-    esac
-    printf '%s' "$out"
-}
-
-do_update() {
-    echo "============================================="
-    echo "  Re-resolving pinned versions"
-    echo "============================================="
-    echo ""
-    info "Querying upstream for the latest version of each pinned tool..."
-    echo ""
-
-    local changed=0 unchanged=0 failed=0
-    local key spec latest current
-    local -a report=()
-
-    # Preserve file order and all comments: rewrite values in place.
-    local tmp; tmp=$(mktemp "$WORK/tmp.XXXXXX")
-    # Read the <KEY>_CONSTRAINT pins up front rather than re-scanning the file
-    # being looped over once per line.
-    local constraints
-    constraints=$(grep -E '^[[:space:]]*[A-Za-z0-9_]+_CONSTRAINT[[:space:]]*=' "$LOCKFILE" || true)
-
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        # Pass through comments and blanks untouched
-        if [[ -z "${line// }" || "${line#"${line%%[![:space:]]*}"}" == \#* || "$line" != *=* ]]; then
-            printf '%s\n' "$line" >> "$tmp"
-            continue
-        fi
-        key="${line%%=*}"
-        current="${line#*=}"
-        spec=$(resolver_for "$key")
-
-        if [[ "$spec" == "manual" ]]; then
-            printf '%s\n' "$line" >> "$tmp"
-            continue
-        fi
-
-        latest=$(resolve_latest "$spec")
-
-        # A <KEY>_CONSTRAINT pin restricts this tool to a version series, for
-        # tools whose next major needs a different install method. Without it,
-        # --update happily crossed goenv 2.x -> 3.x, which replaced the shell
-        # implementation with a compiled binary and broke the integration.
-        local constraint
-        constraint=$(sed -n "s/^[[:space:]]*${key}_CONSTRAINT[[:space:]]*=[[:space:]]*\\([^#]*\\).*/\\1/p" <<<"$constraints" \
-            | head -1 | sed 's/[[:space:]]*$//')
-        if [[ -n "$constraint" && -n "$latest" ]]; then
-            if [[ "${latest#v}" != "${constraint}"* ]]; then
-                local series
-                series=$(resolve_latest_in_series "$spec" "$constraint" || true)
-                if [[ -n "$series" ]]; then
-                    info "$key: newest is ${latest}, but constrained to ${constraint}x — using ${series}"
-                    latest="$series"
-                else
-                    warn "$key: constrained to ${constraint}x; could not resolve a matching tag — keeping ${current}"
-                    printf '%s\n' "$line" >> "$tmp"
-                    unchanged=$((unchanged + 1))
-                    continue
-                fi
-            fi
-        fi
-
-        if [[ -z "$latest" ]]; then
-            warn "$key: could not resolve latest (network or rate limit) — keeping ${current}"
-            printf '%s\n' "$line" >> "$tmp"
-            failed=$((failed + 1))
-            continue
-        fi
-
-        if [[ "$latest" == "$current" ]]; then
-            printf '%s\n' "$line" >> "$tmp"
-            unchanged=$((unchanged + 1))
-        else
-            printf '%s=%s\n' "$key" "$latest" >> "$tmp"
-            report+=("  ${key}: ${current} → ${latest}")
-            changed=$((changed + 1))
-        fi
-    done < "$LOCKFILE"
-
-    if $DRY_RUN; then
-        info "[dry-run] would rewrite $LOCKFILE"
-        rm -f "$tmp"
-    else
-        mv "$tmp" "$LOCKFILE"
-    fi
-
-    echo ""
-    # Guard required: bash 3.2 (macOS /bin/bash) treats "${a[@]}" on an empty
-    # array as unbound under `set -u`.
-    if [[ $changed -gt 0 ]]; then
-        echo "  UPDATED (${changed}):"
-        printf '%s\n' "${report[@]}"
-    fi
-    echo ""
-    success "${changed} changed · ${unchanged} already latest · ${failed} unresolved"
-    echo ""
-    cat <<'NEXT'
-  Nothing has been installed. Next steps:
-
-    git diff versions.lock     # review exactly what moved
-    ./setup.sh                 # apply the new pins
-
-  To discard these updates:
-
-    git checkout versions.lock
-
-  Note: Neovim plugins are pinned separately in nvim/lazy-lock.json. To update
-  those, run `:Lazy update` inside nvim and commit the resulting lockfile diff.
-
-NEXT
-}
-
-# -----------------------------------------------------------------------------
-# --check : report drift between versions.lock and what is actually installed
-# -----------------------------------------------------------------------------
-
-do_check() {
-    echo "============================================="
-    echo "  Installed vs. pinned"
-    echo "============================================="
-    echo ""
-
-    local drift=0 row name bin key pinned installed
-    for row in neovim:nvim:NVIM_VERSION fzf:fzf:FZF_VERSION ripgrep:rg:RIPGREP_VERSION \
-        fd:fd:FD_VERSION bat:bat:BAT_VERSION jq:jq:JQ_VERSION yq:yq:YQ_VERSION \
-        k9s:k9s:K9S_VERSION lazygit:lazygit:LAZYGIT_VERSION delta:delta:DELTA_VERSION \
-        tree-sitter:tree-sitter:TREE_SITTER_CLI_VERSION; do
-        IFS=: read -r name bin key <<<"$row"
-        pinned=$(pin "$key")
-        installed=$(installed_version "$bin")
-        if [[ -z "$installed" ]]; then
-            printf "  %-16s %-22s %s\n" "$name" "$pinned" "NOT INSTALLED"
-            drift=$((drift + 1))
-        elif version_matches "$pinned" "$installed"; then
-            printf "  %-16s %-22s ok\n" "$name" "$pinned"
-        else
-            printf "  %-16s %-22s DRIFT (installed: %s)\n" "$name" "$pinned" "$(bare_version "$installed")"
-            drift=$((drift + 1))
-        fi
-    done
-
-    echo ""
-    printf "  %-16s %s\n" "mason registry" "$(pin MASON_REGISTRY)"
-    printf "  %-16s %s\n" "psql" "$(psql --version 2>/dev/null || echo 'NOT INSTALLED (needed for nvim database UI)')"
-    echo ""
-    if [[ $drift -eq 0 ]]; then
-        success "No drift — everything matches versions.lock"
-    else
-        warn "${drift} tool(s) differ from versions.lock — run ./setup.sh to reconcile"
-    fi
-    echo ""
-}
-
-# -----------------------------------------------------------------------------
 # Prerequisite Check
 # -----------------------------------------------------------------------------
 
@@ -1970,6 +1301,11 @@ check_prerequisites() {
 # -----------------------------------------------------------------------------
 
 main() {
+    if [[ "$MODE" == "print-block" ]]; then
+        zshrc_block "$PRINT_BLOCK"
+        exit
+    fi
+
     load_lockfile
 
     case "$MODE" in
