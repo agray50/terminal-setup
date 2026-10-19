@@ -29,6 +29,12 @@ BACKUP_WARN_AT=25
 LOCKFILE="${SCRIPT_DIR}/versions.lock"
 MANUAL_STEPS=()
 
+# Every temp file lives under one directory removed on exit, so a failure part
+# way through (this runs under `set -e`) never strands half-written copies of
+# ~/.zshrc or multi-megabyte release archives in $TMPDIR.
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
 DRY_RUN=false
 MODE="install"   # install | update | check
 
@@ -105,14 +111,19 @@ load_lockfile() {
 # Matches the first `KEY=value` line, ignoring comments and surrounding space.
 pin() {
     local key="$1" value
-    value=$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\\([^#]*\\).*/\\1/p" "$LOCKFILE" \
-        | head -1 \
-        | sed 's/[[:space:]]*$//')
+    value=$(pin_optional "$key")
     if [[ -z "$value" ]]; then
         error "versions.lock is missing required key: $key"
         exit 1
     fi
     printf '%s\n' "$value"
+}
+
+# The same lookup for keys that may legitimately be absent (e.g. <KEY>_CONSTRAINT).
+pin_optional() {
+    sed -n "s/^[[:space:]]*${1}[[:space:]]*=[[:space:]]*\\([^#]*\\).*/\\1/p" "$LOCKFILE" \
+        | head -1 \
+        | sed 's/[[:space:]]*$//'
 }
 
 # -----------------------------------------------------------------------------
@@ -145,32 +156,37 @@ detect_arch() {
     esac
 }
 
-# Rust-style arch: x86_64 or aarch64 (used for ripgrep/fd/bat/eza release filenames)
-detect_arch_rust() {
-    case "$(uname -m)" in
-        x86_64)        echo "x86_64" ;;
-        aarch64|arm64) echo "aarch64" ;;
-        *)             uname -m ;;
-    esac
-}
+# Detected once: these used to be re-derived on every use (detect_os alone ran
+# 17 times per install, re-sourcing /etc/os-release each time on Linux).
+OS=$(detect_os)
+ARCH=$(detect_arch)
 
-# Full Rust target triple for the current platform
-detect_rust_target() {
-    local arch os
-    arch=$(detect_arch_rust)
-    os=$(detect_os)
-    if [[ "$os" == "macos" ]]; then
-        echo "${arch}-apple-darwin"
-    else
-        echo "${arch}-unknown-linux-musl"
-    fi
-}
+# Pick the spelling a release uses for this platform. Every project names
+# platforms differently (Darwin/darwin/macos, amd64/x86_64), so each caller
+# passes its own: `$(by_os Darwin Linux)_$(by_arch amd64 arm64)`.
+by_os()   { if [[ "$OS" == "macos" ]]; then echo "$1"; else echo "$2"; fi; }
+by_arch() { if [[ "$ARCH" == "x86_64" ]]; then echo "$1"; else echo "$2"; fi; }
+
+# Rust target triple (ripgrep/fd/bat/delta release filenames).
+RUST_TARGET="$(by_arch x86_64 aarch64)-$(by_os apple-darwin unknown-linux-musl)"
 
 # -----------------------------------------------------------------------------
 # Utilities
 # -----------------------------------------------------------------------------
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+# Install a Homebrew formula unless it is already installed.
+brew_ensure() {
+    brew list "$1" &>/dev/null || run brew install "$1"
+}
+
+# In --dry-run mode, log what would happen and succeed; otherwise fail, so the
+# caller carries on:   dry_skip "would do X" && return 0
+dry_skip() {
+    $DRY_RUN || return 1
+    info "[dry-run] $1"
+}
 
 # Execute (or, in --dry-run mode, just log) a mutating command
 run() {
@@ -236,16 +252,13 @@ add_block() {
         if [[ "$current" == "$content" ]]; then
             return 0
         fi
-        if $DRY_RUN; then
-            info "[dry-run] would UPDATE managed block '${name}' in $file"
-            return 0
-        fi
+        dry_skip "would UPDATE managed block '${name}' in $file" && return 0
         # Replace the region in place, preserving its position in the file.
         # The content is staged in a temp file because awk reads it with
         # getline, which cannot take it on stdin alongside the target file.
         local tmp blockfile
-        tmp=$(mktemp)
-        blockfile=$(mktemp)
+        tmp=$(mktemp "$WORK/tmp.XXXXXX")
+        blockfile=$(mktemp "$WORK/tmp.XXXXXX")
         printf '%s\n' "$content" > "$blockfile"
         awk -v b="$begin" -v e="$end" -v f="$blockfile" '
             $0 == b { print; while ((getline line < f) > 0) print line; close(f); skip = 1; next }
@@ -258,10 +271,7 @@ add_block() {
         return 0
     fi
 
-    if $DRY_RUN; then
-        info "[dry-run] would append managed block '${name}' to $file"
-        return 0
-    fi
+    dry_skip "would append managed block '${name}' to $file" && return 0
     {
         printf '\n%s\n' "$begin"
         printf '%s\n' "$content"
@@ -283,10 +293,7 @@ unmanaged_region() {
 
 backup_if_exists() {
     [[ -e "$1" ]] || return 0
-    if $DRY_RUN; then
-        info "[dry-run] would back up $1 to $BACKUP_DIR"
-        return 0
-    fi
+    dry_skip "would back up $1 to $BACKUP_DIR" && return 0
     mkdir -p "$BACKUP_DIR"
     cp -r "$1" "$BACKUP_DIR/$(basename "$1")"
     info "Backed up $1"
@@ -340,34 +347,57 @@ mason_latest_registry() {
         | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
 }
 
+# The version line of a tool this script installs into LOCAL_BIN, or nothing
+# if it is absent. One probe for the installers and --check, which used to type
+# their own and disagree: --check asked $PATH, the installers asked LOCAL_BIN.
+installed_version() {
+    local bin="$LOCAL_BIN/$1"
+    [[ -x "$bin" ]] || return 0
+    case "$1" in
+        jq)  "$bin" --version 2>/dev/null || true ;;
+        k9s) "$bin" version 2>/dev/null | grep -i 'Version:' | head -1 || true ;;
+        eza) "$bin" --version 2>/dev/null | sed -n 2p || true ;;
+        *)   "$bin" --version 2>/dev/null | head -1 || true ;;
+    esac
+}
+
+# Does an installed version line contain the pinned version? Tags carry a
+# leading `v` (jq's `jq-`) that version output usually doesn't.
+version_matches() {
+    local want="${1#v}"
+    want="${want#jq-}"
+    [[ "$2" == *"$want"* ]]
+}
+
+# The first dotted version number in a line ("ripgrep 15.2.0 (rev …)" -> 15.2.0).
+bare_version() {
+    local re='[0-9][0-9.]*[0-9]'
+    [[ "$1" =~ $re ]] && printf '%s' "${BASH_REMATCH[0]}"
+    return 0
+}
+
 # Compare a pinned tag against an installed version string.
 # Returns 0 (skip — already correct) or 1 (install/update needed).
-# Usage: at_pinned_version "name" "$pinned_tag" "$(binary --version | head -1)"
 at_pinned_version() {
     local name="$1" pinned_tag="$2" installed="$3"
-    local pinned_ver="${pinned_tag#v}"   # strip leading 'v'
-    pinned_ver="${pinned_ver#jq-}"       # jq tags look like 'jq-1.8.2'
     if [[ -z "$installed" ]]; then
         info "Installing ${name} ${pinned_tag}..."
         return 1
     fi
-    if echo "$installed" | grep -qF "$pinned_ver"; then
+    if version_matches "$pinned_tag" "$installed"; then
         success "${name} ${pinned_tag} — pinned, up to date"
         return 0
     fi
-    local cur; cur=$(echo "$installed" | grep -oE '[0-9][0-9.]*[0-9]' | head -1)
-    info "Changing ${name}: ${cur:-unknown} → ${pinned_ver} (pinned)"
+    local cur; cur=$(bare_version "$installed")
+    info "Changing ${name}: ${cur:-unknown} → ${pinned_tag} (pinned)"
     return 1
 }
 
 # In-place sed that works on both GNU (Linux) and BSD (macOS) sed
 sed_inplace() {
     local expr="$1" file="$2"
-    if $DRY_RUN; then
-        info "[dry-run] would edit $file: $expr"
-        return 0
-    fi
-    if [[ "$(detect_os)" == "macos" ]]; then
+    dry_skip "would edit $file: $expr" && return 0
+    if [[ "$OS" == "macos" ]]; then
         sed -i '' "$expr" "$file"
     else
         sed -i "$expr" "$file"
@@ -397,10 +427,7 @@ clone_at_tag() {
         fi
     fi
 
-    if $DRY_RUN; then
-        info "[dry-run] would check out ${name} at ${ref} in $dir"
-        return 0
-    fi
+    dry_skip "would check out ${name} at ${ref} in $dir" && return 0
 
     if [[ ! -d "$dir/.git" ]]; then
         rm -rf "$dir"
@@ -424,11 +451,8 @@ clone_at_tag() {
 # -----------------------------------------------------------------------------
 
 pkg_install() {
-    local pkg="$1" os="${2:-$(detect_os)}"
-    if $DRY_RUN; then
-        info "[dry-run] would install package '$pkg' via ${os}'s package manager"
-        return 0
-    fi
+    local pkg="$1" os="${2:-$OS}"
+    dry_skip "would install package '$pkg' via ${os}'s package manager" && return 0
     case "$os" in
         macos)   brew install "$pkg" ;;
         debian)  sudo apt-get install -y "$pkg" ;;
@@ -445,13 +469,10 @@ pkg_install() {
 # Download a .tar.gz archive, find a named binary inside, install to LOCAL_BIN
 install_from_tarball() {
     local url="$1" binary="$2"
-    if $DRY_RUN; then
-        info "[dry-run] would download and install '$binary' from $url"
-        return 0
-    fi
+    dry_skip "would download and install '$binary' from $url" && return 0
 
     local tmpdir
-    tmpdir=$(mktemp -d)
+    tmpdir=$(mktemp -d "$WORK/dir.XXXXXX")
 
     curl -fsSL "$url" -o "$tmpdir/archive.tar.gz"
     tar -xzf "$tmpdir/archive.tar.gz" -C "$tmpdir"
@@ -466,20 +487,34 @@ install_from_tarball() {
         return 1
     fi
 
-    mkdir -p "$LOCAL_BIN"
     cp "$bin_path" "$LOCAL_BIN/$binary"
     chmod 755 "$LOCAL_BIN/$binary"
     rm -rf "$tmpdir"
 }
 
+# Install a pinned release binary into LOCAL_BIN unless it is already at the
+# pin. The URL is a template: {tag} is the pinned tag, {ver} the tag without its
+# leading `v`, {target} the Rust triple. An archive (.tar.gz) is unpacked and
+# searched for <bin>; anything else is the binary itself.
+install_release() {
+    local bin="$1" key="$2" url="$3" tag
+    info "=== ${bin} ==="
+    tag=$(pin "$key")
+    at_pinned_version "$bin" "$tag" "$(installed_version "$bin")" && return 0
+    url=${url//\{tag\}/$tag}
+    url=${url//\{ver\}/${tag#v}}
+    url=${url//\{target\}/$RUST_TARGET}
+    case "$url" in
+        *.tar.gz) install_from_tarball "$url" "$bin" ;;
+        *)        install_from_binary_url "$url" "$bin" ;;
+    esac
+    success "${bin} ${tag} installed"
+}
+
 # Download a single binary file directly to LOCAL_BIN
 install_from_binary_url() {
     local url="$1" binary="$2"
-    if $DRY_RUN; then
-        info "[dry-run] would download '$binary' from $url"
-        return 0
-    fi
-    mkdir -p "$LOCAL_BIN"
+    dry_skip "would download '$binary' from $url" && return 0
     curl -fsSL "$url" -o "$LOCAL_BIN/$binary"
     chmod 755 "$LOCAL_BIN/$binary"
 }
@@ -519,10 +554,7 @@ install_ohmyzsh() {
     info "=== oh-my-zsh ==="
     local dir="${HOME}/.oh-my-zsh"
     if [[ ! -d "$dir" ]]; then
-        if $DRY_RUN; then
-            info "[dry-run] would install oh-my-zsh"
-            return 0
-        fi
+        dry_skip "would install oh-my-zsh" && return 0
         RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
         success "oh-my-zsh installed"
     fi
@@ -562,12 +594,9 @@ setup_p10k_instant_prompt() {
     if grep -qF 'p10k-instant-prompt' "$zshrc" 2>/dev/null; then
         return 0
     fi
-    if $DRY_RUN; then
-        info "[dry-run] would prepend p10k instant-prompt block to $zshrc"
-        return 0
-    fi
+    dry_skip "would prepend p10k instant-prompt block to $zshrc" && return 0
     local tmp
-    tmp=$(mktemp)
+    tmp=$(mktemp "$WORK/tmp.XXXXXX")
     cat > "$tmp" <<'IP_EOF'
 # Enable Powerlevel10k instant prompt. Should stay close to the top of ~/.zshrc.
 # Initialization code that may require console input (password prompts, [y/n]
@@ -594,13 +623,8 @@ install_zsh_plugins() {
     if [[ -f "${HOME}/.zshrc" ]]; then
         local plugin
         for plugin in zsh-syntax-highlighting zsh-autosuggestions; do
-            if grep -q "$plugin" "${HOME}/.zshrc"; then
-                continue
-            elif $DRY_RUN; then
-                info "[dry-run] would add $plugin to .zshrc plugins list"
-            else
-                perl -i -pe "s/^(plugins=\()(.+)(\))/\$1\$2 $plugin\$3/" "${HOME}/.zshrc"
-            fi
+            grep -q "$plugin" "${HOME}/.zshrc" \
+                || sed_inplace "s/^plugins=(\(..*\))/plugins=(\1 $plugin)/" "${HOME}/.zshrc"
         done
     fi
 }
@@ -612,7 +636,7 @@ install_zsh_plugins() {
 install_bash() {
     info "=== bash ==="
     # macOS ships with bash 3.2 (GPL licensing); upgrade to bash 5 via brew
-    if [[ "$(detect_os)" != "macos" ]]; then success "bash — skipped (Linux)"; return 0; fi
+    if [[ "$OS" != "macos" ]]; then success "bash — skipped (Linux)"; return 0; fi
     local current_version major
     current_version=$(bash --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
     major="${current_version%%.*}"
@@ -620,9 +644,7 @@ install_bash() {
         success "bash already at version $current_version"
         return 0
     fi
-    if ! brew list bash &>/dev/null; then
-        run brew install bash
-    fi
+    brew_ensure bash
     success "bash upgraded"
 }
 
@@ -634,7 +656,7 @@ install_fzf() {
     # and key-binding shell scripts; the binary comes from its own installer.
     clone_at_tag "https://github.com/junegunn/fzf.git" "${HOME}/.fzf" "$tag" "fzf"
 
-    if ! at_pinned_version "fzf" "$tag" "$("$LOCAL_BIN/fzf" --version 2>/dev/null | head -1)"; then
+    if ! at_pinned_version "fzf" "$tag" "$(installed_version fzf)"; then
         run "${HOME}/.fzf/install" --bin
         success "fzf ${tag} binary installed"
     fi
@@ -642,42 +664,28 @@ install_fzf() {
     if $DRY_RUN; then
         info "[dry-run] would symlink ${HOME}/.fzf/bin/fzf -> $LOCAL_BIN/fzf"
     else
-        mkdir -p "$LOCAL_BIN"
         ln -sf "${HOME}/.fzf/bin/fzf" "$LOCAL_BIN/fzf"
     fi
 
     # Remove legacy fzf shell integration lines (replaced by explicit functions in setup_zsh_functions)
-    if [[ -f "${HOME}/.zshrc" ]]; then
-        if $DRY_RUN; then
-            info "[dry-run] would strip legacy fzf shell-integration lines from .zshrc"
-        else
-            perl -i -ne 'print unless /\[ -f ~\/\.fzf\.zsh \]/ || /eval "\$\(fzf --zsh\)"/' "${HOME}/.zshrc"
-        fi
+    if grep -qE '\[ -f ~/\.fzf\.zsh \]|eval "\$\(fzf --zsh\)"' "${HOME}/.zshrc" 2>/dev/null; then
+        sed_inplace '/\[ -f ~\/\.fzf\.zsh \]/d; /eval "\$(fzf --zsh)"/d' "${HOME}/.zshrc"
     fi
 }
 
 install_neovim() {
     info "=== neovim ==="
 
-    local os arch tag url
-    os=$(detect_os)
-    arch=$(detect_arch)
+    local tag url
     tag=$(pin NVIM_VERSION)
 
-    at_pinned_version "neovim" "$tag" "$(nvim --version 2>/dev/null | head -1)" && return 0
+    at_pinned_version "neovim" "$tag" "$(installed_version nvim)" && return 0
 
-    if [[ "$os" == "macos" ]]; then
-        url="https://github.com/neovim/neovim/releases/download/${tag}/nvim-macos-${arch}.tar.gz"
-    else
-        url="https://github.com/neovim/neovim/releases/download/${tag}/nvim-linux-${arch}.tar.gz"
-    fi
+    url="https://github.com/neovim/neovim/releases/download/${tag}/nvim-$(by_os macos linux)-${ARCH}.tar.gz"
 
-    if $DRY_RUN; then
-        info "[dry-run] would download and install neovim ${tag} from $url"
-        return 0
-    fi
+    dry_skip "would download and install neovim ${tag} from $url" && return 0
 
-    local tmpdir; tmpdir=$(mktemp -d)
+    local tmpdir; tmpdir=$(mktemp -d "$WORK/dir.XXXXXX")
     curl -fsSL "$url" -o "$tmpdir/nvim.tar.gz"
     tar -xzf "$tmpdir/nvim.tar.gz" -C "$tmpdir"
 
@@ -686,56 +694,30 @@ install_neovim() {
     mkdir -p "${HOME}/.local"
     rm -rf "${HOME}/.local/nvim"
     mv "$nvim_dir" "${HOME}/.local/nvim"
-    mkdir -p "$LOCAL_BIN"
     ln -sf "${HOME}/.local/nvim/bin/nvim" "$LOCAL_BIN/nvim"
     rm -rf "$tmpdir"
     success "neovim ${tag} installed"
 }
 
 install_ripgrep() {
-    info "=== ripgrep ==="
-    local tag version target
-    tag=$(pin RIPGREP_VERSION)
-    at_pinned_version "rg" "$tag" "$("$LOCAL_BIN/rg" --version 2>/dev/null | head -1)" && return 0
-    version="${tag#v}"
-    target=$(detect_rust_target)
-    install_from_tarball \
-        "https://github.com/BurntSushi/ripgrep/releases/download/${tag}/ripgrep-${version}-${target}.tar.gz" \
-        "rg"
-    success "rg ${tag} installed"
+    install_release rg RIPGREP_VERSION \
+        "https://github.com/BurntSushi/ripgrep/releases/download/{tag}/ripgrep-{ver}-{target}.tar.gz"
 }
 
 install_fd() {
-    info "=== fd ==="
-    local tag target
-    tag=$(pin FD_VERSION)
-    at_pinned_version "fd" "$tag" "$("$LOCAL_BIN/fd" --version 2>/dev/null | head -1)" && return 0
-    target=$(detect_rust_target)
-    install_from_tarball \
-        "https://github.com/sharkdp/fd/releases/download/${tag}/fd-${tag}-${target}.tar.gz" \
-        "fd"
-    success "fd ${tag} installed"
+    install_release fd FD_VERSION \
+        "https://github.com/sharkdp/fd/releases/download/{tag}/fd-{tag}-{target}.tar.gz"
 }
 
 install_bat() {
-    info "=== bat ==="
-    local tag target
-    tag=$(pin BAT_VERSION)
-    at_pinned_version "bat" "$tag" "$("$LOCAL_BIN/bat" --version 2>/dev/null | head -1)" && return 0
-    target=$(detect_rust_target)
-    install_from_tarball \
-        "https://github.com/sharkdp/bat/releases/download/${tag}/bat-${tag}-${target}.tar.gz" \
-        "bat"
-    success "bat ${tag} installed"
+    install_release bat BAT_VERSION \
+        "https://github.com/sharkdp/bat/releases/download/{tag}/bat-{tag}-{target}.tar.gz"
 }
 
 install_eza() {
-    info "=== eza ==="
-    local os arch tag url
-    os=$(detect_os)
-    tag=$(pin EZA_VERSION)
-
-    if [[ "$os" == "macos" ]]; then
+    if [[ "$OS" == "macos" ]]; then
+        info "=== eza ==="
+        local tag; tag=$(pin EZA_VERSION)
         # eza publishes no macOS binaries, so brew is the only option. brew
         # tracks its own formula version, which may differ from the pinned tag —
         # report what brew actually has rather than echoing the pin back.
@@ -743,102 +725,43 @@ install_eza() {
             success "eza $(eza --version 2>/dev/null | grep -oE 'v[0-9.]+' | head -1) — via brew (pin ${tag} is advisory on macOS)"
             return 0
         fi
-        if $DRY_RUN; then
-            info "[dry-run] would run: brew install eza"
-        else
-            brew install eza
-        fi
+        brew_ensure eza
         success "eza installed via brew"
         return 0
     fi
 
-    at_pinned_version "eza" "$tag" "$("$LOCAL_BIN/eza" --version 2>/dev/null | head -2 | tail -1)" && return 0
-
     # Linux: x86_64 has a musl build; aarch64 only has gnu
-    arch=$(detect_arch_rust)
-    if [[ "$arch" == "x86_64" ]]; then
-        url="https://github.com/eza-community/eza/releases/download/${tag}/eza_x86_64-unknown-linux-musl.tar.gz"
-    else
-        url="https://github.com/eza-community/eza/releases/download/${tag}/eza_${arch}-unknown-linux-gnu.tar.gz"
-    fi
-    install_from_tarball "$url" "eza"
-    success "eza ${tag} installed"
+    install_release eza EZA_VERSION \
+        "https://github.com/eza-community/eza/releases/download/{tag}/eza_$(by_arch x86_64-unknown-linux-musl aarch64-unknown-linux-gnu).tar.gz"
 }
 
 install_jq() {
-    info "=== jq ==="
-    local os arch tag jq_os jq_arch
-    os=$(detect_os)
-    arch=$(detect_arch)
-    tag=$(pin JQ_VERSION)
-    at_pinned_version "jq" "$tag" "$("$LOCAL_BIN/jq" --version 2>/dev/null)" && return 0
-    [[ "$os" == "macos" ]] && jq_os="macos" || jq_os="linux"
-    [[ "$arch" == "x86_64" ]] && jq_arch="amd64" || jq_arch="arm64"
-    install_from_binary_url \
-        "https://github.com/jqlang/jq/releases/download/${tag}/jq-${jq_os}-${jq_arch}" \
-        "jq"
-    success "jq ${tag} installed"
+    install_release jq JQ_VERSION \
+        "https://github.com/jqlang/jq/releases/download/{tag}/jq-$(by_os macos linux)-$(by_arch amd64 arm64)"
 }
 
 install_yq() {
-    info "=== yq ==="
-    local os arch tag yq_os yq_arch
-    os=$(detect_os)
-    arch=$(detect_arch)
-    tag=$(pin YQ_VERSION)
-    at_pinned_version "yq" "$tag" "$("$LOCAL_BIN/yq" --version 2>/dev/null | head -1)" && return 0
-    [[ "$os" == "macos" ]] && yq_os="darwin" || yq_os="linux"
-    [[ "$arch" == "x86_64" ]] && yq_arch="amd64" || yq_arch="arm64"
-    install_from_binary_url \
-        "https://github.com/mikefarah/yq/releases/download/${tag}/yq_${yq_os}_${yq_arch}" \
-        "yq"
-    success "yq ${tag} installed"
+    install_release yq YQ_VERSION \
+        "https://github.com/mikefarah/yq/releases/download/{tag}/yq_$(by_os darwin linux)_$(by_arch amd64 arm64)"
 }
 
 install_k9s() {
-    info "=== k9s ==="
-    local os arch tag k9s_os k9s_arch
-    os=$(detect_os)
-    arch=$(detect_arch)
-    tag=$(pin K9S_VERSION)
-    at_pinned_version "k9s" "$tag" "$("$LOCAL_BIN/k9s" version 2>/dev/null | grep -i 'Version:' | head -1)" && return 0
-    [[ "$os" == "macos" ]] && k9s_os="Darwin" || k9s_os="Linux"
-    [[ "$arch" == "x86_64" ]] && k9s_arch="amd64" || k9s_arch="arm64"
-    install_from_tarball \
-        "https://github.com/derailed/k9s/releases/download/${tag}/k9s_${k9s_os}_${k9s_arch}.tar.gz" \
-        "k9s"
-    success "k9s ${tag} installed"
+    install_release k9s K9S_VERSION \
+        "https://github.com/derailed/k9s/releases/download/{tag}/k9s_$(by_os Darwin Linux)_$(by_arch amd64 arm64).tar.gz"
 }
 
 install_lazygit() {
-    info "=== lazygit ==="
     # Primary git UI (nvim: <leader>gg). Handles interactive rebase, conflict
     # resolution, stashes, cherry-pick and amend far better than any nvim plugin.
-    local os arch tag lg_os lg_arch
-    os=$(detect_os)
-    arch=$(detect_arch)
-    tag=$(pin LAZYGIT_VERSION)
-    at_pinned_version "lazygit" "$tag" "$("$LOCAL_BIN/lazygit" --version 2>/dev/null | head -1)" && return 0
-    [[ "$os" == "macos" ]] && lg_os="Darwin" || lg_os="Linux"
-    [[ "$arch" == "x86_64" ]] && lg_arch="x86_64" || lg_arch="arm64"
-    install_from_tarball \
-        "https://github.com/jesseduffield/lazygit/releases/download/${tag}/lazygit_${tag#v}_${lg_os}_${lg_arch}.tar.gz" \
-        "lazygit"
-    success "lazygit ${tag} installed"
+    install_release lazygit LAZYGIT_VERSION \
+        "https://github.com/jesseduffield/lazygit/releases/download/{tag}/lazygit_{ver}_$(by_os Darwin Linux)_$(by_arch x86_64 arm64).tar.gz"
 }
 
 install_delta() {
-    info "=== delta ==="
     # Syntax-highlighted git diffs in the terminal; configured as git's pager
     # in git/gitconfig and reused by fzf-lua's git previewers.
-    local tag target
-    tag=$(pin DELTA_VERSION)
-    at_pinned_version "delta" "$tag" "$("$LOCAL_BIN/delta" --version 2>/dev/null | head -1)" && return 0
-    target=$(detect_rust_target)
-    install_from_tarball \
-        "https://github.com/dandavison/delta/releases/download/${tag}/delta-${tag}-${target}.tar.gz" \
-        "delta"
-    success "delta ${tag} installed"
+    install_release delta DELTA_VERSION \
+        "https://github.com/dandavison/delta/releases/download/{tag}/delta-{tag}-{target}.tar.gz"
 }
 
 install_postgres_client() {
@@ -849,14 +772,13 @@ install_postgres_client() {
         success "psql already installed ($(psql --version 2>/dev/null))"
         return 0
     fi
-    case "$(detect_os)" in
+    case "$OS" in
         macos)
             # libpq is keg-only: it ships psql but is not symlinked into PATH.
             if $DRY_RUN; then
                 info "[dry-run] would run: brew install libpq and symlink psql"
             else
                 brew install libpq
-                mkdir -p "$LOCAL_BIN"
                 local pq; pq="$(brew --prefix libpq 2>/dev/null)"
                 if [[ -x "$pq/bin/psql" ]]; then
                     ln -sf "$pq/bin/psql" "$LOCAL_BIN/psql"
@@ -943,7 +865,6 @@ install_tree_sitter_cli() {
     if $DRY_RUN; then
         info "[dry-run] would symlink ${HOME}/.cargo/bin/tree-sitter -> $LOCAL_BIN/tree-sitter"
     else
-        mkdir -p "$LOCAL_BIN"
         ln -sf "${HOME}/.cargo/bin/tree-sitter" "$LOCAL_BIN/tree-sitter"
     fi
 }
@@ -1035,7 +956,7 @@ pyenv() {
 BLOCK_EOF
 
     # pyenv builds Python from source — surface the required packages per distro
-    case "$(detect_os)" in
+    case "$OS" in
         debian)
             manual "pyenv Python build deps (Debian/Ubuntu): sudo apt-get install -y build-essential libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev" ;;
         fedora)
@@ -1067,7 +988,7 @@ goenv() {
 BLOCK_EOF
 
     # goenv downloads pre-built Go binaries but needs gcc/make for cgo-based tooling
-    case "$(detect_os)" in
+    case "$OS" in
         debian)
             manual "goenv build deps (Debian/Ubuntu): sudo apt-get install -y build-essential" ;;
         fedora)
@@ -1087,7 +1008,7 @@ install_sdkman() {
         command_exists zip  || pkg_install "zip"
         command_exists unzip || pkg_install "unzip"
         local sdkman_script
-        sdkman_script=$(mktemp)
+        sdkman_script=$(mktemp "$WORK/tmp.XXXXXX")
         curl -s "https://get.sdkman.io" -o "$sdkman_script"
         bash "$sdkman_script"
         rm -f "$sdkman_script"
@@ -1129,15 +1050,12 @@ install_docker() {
         return 0
     fi
 
-    local os
-    os=$(detect_os)
-
-    if $DRY_RUN && [[ "$os" != "macos" ]]; then
-        info "[dry-run] would install Docker via ${os}'s package manager (multiple sudo steps: repo setup, package install, enable service, add \$USER to docker group)"
+    if $DRY_RUN && [[ "$OS" != "macos" ]]; then
+        info "[dry-run] would install Docker via ${OS}'s package manager (multiple sudo steps: repo setup, package install, enable service, add \$USER to docker group)"
         return 0
     fi
 
-    case "$os" in
+    case "$OS" in
         macos)
             manual "Install Docker Desktop: brew install --cask docker"
             ;;
@@ -1185,16 +1103,12 @@ install_tfenv() {
     info "=== tfenv ==="
     clone_at_tag "https://github.com/tfutils/tfenv.git" "${HOME}/.tfenv" "$(pin TFENV_VERSION)" "tfenv"
 
-    if $DRY_RUN; then
-        info "[dry-run] would symlink tfenv binaries into $LOCAL_BIN"
-        return 0
-    fi
+    dry_skip "would symlink tfenv binaries into $LOCAL_BIN" && return 0
 
-    mkdir -p "$LOCAL_BIN"
     local bin dest
     for bin in "${HOME}/.tfenv/bin/"*; do
         dest="$LOCAL_BIN/$(basename "$bin")"
-        [[ -e "$dest" ]] || ln -s "$bin" "$dest"
+        ln -sf "$bin" "$dest"
     done
     success "tfenv binaries linked"
 }
@@ -1255,7 +1169,7 @@ migrate_legacy_zshrc() {
     # step telling the user to hand-delete the installer's own blocks. 53
     # backup directories had accumulated here before this was spotted.
     local unmanaged
-    unmanaged=$(mktemp)
+    unmanaged=$(mktemp "$WORK/tmp.XXXXXX")
     unmanaged_region "$zshrc" > "$unmanaged"
 
     local found=0 h
@@ -1280,35 +1194,53 @@ migrate_legacy_zshrc() {
         return 0
     fi
 
-    if $DRY_RUN; then
-        info "[dry-run] would remove legacy un-delimited blocks from $zshrc"
-        return 0
-    fi
+    dry_skip "would remove legacy un-delimited blocks from $zshrc" && return 0
 
     backup_if_exists "$zshrc"
 
     # Delete each legacy header and the contiguous non-blank lines after it.
     # Never touches a managed region: those start with "# >>> terminal-setup:".
     local hdr_file
-    hdr_file=$(mktemp)
+    hdr_file=$(mktemp "$WORK/tmp.XXXXXX")
     printf '%s\n' "${legacy_headers[@]}" > "$hdr_file"
     local tmp
-    tmp=$(mktemp)
+    tmp=$(mktemp "$WORK/tmp.XXXXXX")
+    # One pass: drop legacy blocks, drop un-managed copies of SDKMAN's init (its
+    # installer writes one, older versions of this script appended another, and
+    # the managed sdkman block written later in this run is the one that counts),
+    # and collapse the runs of blank lines left behind. This used to be three
+    # passes, two of them perl -- and the perl dedupe kept the *first* copy
+    # file-wide, so when the installer's copy came first it deleted the managed
+    # block's lines instead.
     awk -v hdrfile="$hdr_file" '
         BEGIN {
             while ((getline h < hdrfile) > 0) { hdr[h] = 1 }
             close(hdrfile)
+            sdk1 = "export SDKMAN_DIR=\"$HOME/.sdkman\""
+            sdk2 = "[[ -s \"$HOME/.sdkman/bin/sdkman-init.sh\" ]] && source \"$HOME/.sdkman/bin/sdkman-init.sh\""
+        }
+        function emit(line) {
+            if (line == "" && blank) return
+            blank = (line == "")
+            print line
+        }
+        # A held SDKMAN export line is resolved by the line after it.
+        held {
+            held = 0
+            if ($0 == sdk2) next
+            emit(sdk1)
         }
         # Inside a managed region: always keep, never treat as legacy.
-        /^# >>> terminal-setup:/ { managed = 1; print; next }
-        /^# <<< terminal-setup:/ { managed = 0; print; next }
-        managed { print; next }
+        /^# >>> terminal-setup:/ { managed = 1; emit($0); next }
+        /^# <<< terminal-setup:/ { managed = 0; emit($0); next }
+        managed { emit($0); next }
 
         skipping {
             if ($0 == "") { skipping = 0 }   # blank line ends the legacy block
             next
         }
         ($0 in hdr) { skipping = 1; next }
+        $0 == sdk1 { held = 1; next }
 
         # The nvm installer writes these three lines with no header. Matched
         # exactly so nothing else can be caught by them; the managed nvm block
@@ -1316,22 +1248,10 @@ migrate_legacy_zshrc() {
         $0 == "export NVM_DIR=\"$HOME/.nvm\"" { next }
         /^\[ -s "\$NVM_DIR\/nvm\.sh" \]/ { next }
         /^\[ -s "\$NVM_DIR\/bash_completion" \]/ { next }
-        { print }
+        { emit($0) }
+        END { if (held) emit(sdk1) }
     ' "$zshrc" > "$tmp"
     mv "$tmp" "$zshrc"
-    rm -f "$hdr_file"
-
-    # Collapse runs of blank lines left behind.
-    perl -i -0777 -pe 's/\n{3,}/\n\n/g' "$zshrc"
-
-    # Duplicate SDKMAN init: its own installer writes one and older versions of
-    # this script appended another. Keep the first.
-    perl -i -0777 -pe '
-        my $blk = qq{export SDKMAN_DIR="\$HOME/.sdkman"\n[[ -s "\$HOME/.sdkman/bin/sdkman-init.sh" ]] && source "\$HOME/.sdkman/bin/sdkman-init.sh"\n};
-        my $q = quotemeta $blk;
-        my $n = 0;
-        s/$q/(++$n == 1) ? $blk : ""/ge;
-    ' "$zshrc"
 
     success "legacy un-delimited blocks removed (backed up to $BACKUP_DIR)"
 
@@ -1339,7 +1259,7 @@ migrate_legacy_zshrc() {
     # un-managed remainder, since "# Custom aliases" and "# Custom shell
     # functions" are also the first lines of the blocks written above.
     local leftover="" rest
-    rest=$(mktemp)
+    rest=$(mktemp "$WORK/tmp.XXXXXX")
     unmanaged_region "$zshrc" > "$rest"
     grep -qxF "# Custom aliases" "$rest" && leftover="${leftover} '# Custom aliases'"
     grep -qxF "# Custom shell functions" "$rest" && leftover="${leftover} '# Custom shell functions'"
@@ -1355,16 +1275,14 @@ setup_local_bin() {
     # .zshrc — sourced last means it prepends last, giving it priority over
     # Homebrew and any other PATH block written earlier.
     local line='export PATH="$HOME/.local/bin:$PATH"' zshrc="${HOME}/.zshrc"
-    if $DRY_RUN; then
-        info "[dry-run] would ensure $LOCAL_BIN exists and re-append its PATH line to $zshrc"
-        return 0
-    fi
-    mkdir -p "$LOCAL_BIN"
+    dry_skip "would ensure $LOCAL_BIN exists and re-append its PATH line to $zshrc" && return 0
     touch "$zshrc"
-    # grep exits 1 when it filters out every line or the file is empty, so the
-    # exit status is deliberately ignored — but the move must still happen.
-    grep -vF "$line" "$zshrc" > "${zshrc}.tmp" || true
-    mv "${zshrc}.tmp" "$zshrc"
+    # grep exits 1 when it filters out every line or the file is empty — fine,
+    # the move must still happen. Anything else is a real error, and moving its
+    # partial output over .zshrc would truncate it; `|| true` used to allow that.
+    local tmp; tmp=$(mktemp "$WORK/tmp.XXXXXX")
+    grep -vF "$line" "$zshrc" > "$tmp" || [[ $? -eq 1 ]]
+    mv "$tmp" "$zshrc"
     echo "$line" >> "$zshrc"
     success "$LOCAL_BIN on PATH (last, so it takes precedence)"
 }
@@ -1597,10 +1515,7 @@ setup_gitconfig_version() {
         notes="${notes}  ; merge.conflictstyle=zdiff3 needs git >= 2.35; using diff3\n"
     fi
 
-    if $DRY_RUN; then
-        info "[dry-run] would write $out (conflictstyle=${conflictstyle})"
-        return 0
-    fi
+    dry_skip "would write $out (conflictstyle=${conflictstyle})" && return 0
 
     {
         echo "; GENERATED by setup.sh for git ${gv:-unknown} — do not edit, not committed."
@@ -1654,28 +1569,30 @@ setup_gitconfig_version() {
     fi
 }
 
-setup_nvim_config() {
-    info "=== Neovim config ==="
-    local target="${HOME}/.config/nvim"
-    local source="${SCRIPT_DIR}/nvim"
-
-    if [[ ! -d "$source" ]]; then
-        error "nvim config directory not found: $source"
+# Symlink a repo config into place, backing up whatever was there.
+# Symlinked, not copied: edits to the repo take effect immediately, with no
+# re-run of this script.
+link_config() {
+    local name="$1" source="$2" target="$3"
+    if [[ ! -e "$source" ]]; then
+        error "${name} config not found: $source"
         return 1
     fi
-
     if [[ -L "$target" && "$(readlink "$target")" == "$source" ]]; then
-        success "Neovim config symlink already correct"
-    elif $DRY_RUN; then
-        backup_if_exists "$target"
-        info "[dry-run] would symlink $target -> $source"
-    else
-        backup_if_exists "$target"
-        rm -rf "$target"
-        mkdir -p "$(dirname "$target")"
-        ln -s "$source" "$target"
-        success "Neovim config symlinked: $target -> $source"
+        success "${name} config symlink already correct"
+        return 0
     fi
+    backup_if_exists "$target"
+    dry_skip "would symlink $target -> $source" && return 0
+    rm -rf "$target"
+    mkdir -p "$(dirname "$target")"
+    ln -s "$source" "$target"
+    success "${name} config symlinked: $target -> $source"
+}
+
+setup_nvim_config() {
+    info "=== Neovim config ==="
+    link_config "Neovim" "${SCRIPT_DIR}/nvim" "${HOME}/.config/nvim" || return 1
 
     # Write the pinned Mason registry snapshot where the nvim config reads it.
     # This is what freezes every LSP server, formatter, linter and DAP adapter.
@@ -1703,10 +1620,7 @@ setup_mason_pin() {
         success "Mason registry pin already at ${registry}"
         return 0
     fi
-    if $DRY_RUN; then
-        info "[dry-run] would write Mason registry pin ${registry} to $out"
-        return 0
-    fi
+    dry_skip "would write Mason registry pin ${registry} to $out" && return 0
     cat > "$out" <<EOF
 -- GENERATED by setup.sh from versions.lock — do not edit by hand.
 -- Change MASON_REGISTRY in versions.lock (or run ./setup.sh --update) instead.
@@ -1723,19 +1637,15 @@ EOF
 setup_clipboard_helper() {
     info "=== clipboard helper ==="
     # macOS uses pbcopy natively — no helper needed
-    if [[ "$(detect_os)" == "macos" ]]; then success "clipboard — pbcopy (macOS native)"; return 0; fi
+    if [[ "$OS" == "macos" ]]; then success "clipboard — pbcopy (macOS native)"; return 0; fi
 
     # Install both clipboard backends: xclip (X11) and wl-clipboard (Wayland)
     command_exists xclip    || pkg_install "xclip"
     command_exists wl-copy  || pkg_install "wl-clipboard"
 
-    if $DRY_RUN; then
-        info "[dry-run] would write clipboard helper to $LOCAL_BIN/tmux-clipboard"
-        return 0
-    fi
+    dry_skip "would write clipboard helper to $LOCAL_BIN/tmux-clipboard" && return 0
 
     # Write a runtime-detection wrapper so tmux works on both X11 and Wayland
-    mkdir -p "$LOCAL_BIN"
     cat > "$LOCAL_BIN/tmux-clipboard" <<'EOF'
 #!/bin/sh
 # Route clipboard writes to the correct backend at runtime.
@@ -1757,29 +1667,10 @@ EOF
 
 setup_tmux_config() {
     info "=== tmux config ==="
-    local target="${HOME}/.tmux.conf"
-    local source="${SCRIPT_DIR}/tmux/tmux.conf"
-
-    if [[ ! -f "$source" ]]; then
-        error "tmux config not found: $source"
-        return 1
-    fi
-
-    # Symlinked, not copied: edits to the repo take effect on the next
-    # `prefix + r` with no re-run of this script. The old copy+sed approach
-    # meant repo changes were invisible until setup.sh ran again. The
-    # pbcopy/tmux-clipboard choice now lives inside tmux.conf as an if-shell.
-    if [[ -L "$target" && "$(readlink "$target")" == "$source" ]]; then
-        success "tmux config symlink already correct"
-    elif $DRY_RUN; then
-        backup_if_exists "$target"
-        info "[dry-run] would symlink $target -> $source"
-    else
-        backup_if_exists "$target"
-        rm -f "$target"
-        ln -s "$source" "$target"
-        success "tmux config symlinked: $target -> $source"
-    fi
+    # The old copy+sed approach meant repo changes were invisible until
+    # setup.sh ran again; symlinked, they apply on the next `prefix + r`. The
+    # pbcopy/tmux-clipboard choice lives inside tmux.conf as an if-shell.
+    link_config "tmux" "${SCRIPT_DIR}/tmux/tmux.conf" "${HOME}/.tmux.conf" || return 1
 
     setup_tmux_plugin_pins
 
@@ -1804,10 +1695,7 @@ setup_tmux_plugin_pins() {
     cat_tmux=$(pin CATPPUCCIN_TMUX_VERSION)
     cpu=$(pin TMUX_CPU_COMMIT)
 
-    if $DRY_RUN; then
-        info "[dry-run] would pin tmux plugins in tmux.conf (navigator=${nav:0:12} catppuccin=${cat_tmux} cpu=${cpu:0:12})"
-        return 0
-    fi
+    dry_skip "would pin tmux plugins in tmux.conf (navigator=${nav:0:12} catppuccin=${cat_tmux} cpu=${cpu:0:12})" && return 0
 
     sed_inplace "s|^set -g @plugin 'christoomey/vim-tmux-navigator.*|set -g @plugin 'christoomey/vim-tmux-navigator#${nav}'|" "$conf"
     sed_inplace "s|^set -g @plugin 'catppuccin/tmux.*|set -g @plugin 'catppuccin/tmux#${cat_tmux}'|" "$conf"
@@ -1911,7 +1799,11 @@ do_update() {
     local -a report=()
 
     # Preserve file order and all comments: rewrite values in place.
-    local tmp; tmp=$(mktemp)
+    local tmp; tmp=$(mktemp "$WORK/tmp.XXXXXX")
+    # Read the <KEY>_CONSTRAINT pins up front rather than re-scanning the file
+    # being looped over once per line.
+    local constraints
+    constraints=$(grep -E '^[[:space:]]*[A-Za-z0-9_]+_CONSTRAINT[[:space:]]*=' "$LOCKFILE" || true)
 
     while IFS= read -r line || [[ -n "$line" ]]; do
         # Pass through comments and blanks untouched
@@ -1935,7 +1827,7 @@ do_update() {
         # --update happily crossed goenv 2.x -> 3.x, which replaced the shell
         # implementation with a compiled binary and broke the integration.
         local constraint
-        constraint=$(sed -n "s/^[[:space:]]*${key}_CONSTRAINT[[:space:]]*=[[:space:]]*\\([^#]*\\).*/\\1/p" "$LOCKFILE" \
+        constraint=$(sed -n "s/^[[:space:]]*${key}_CONSTRAINT[[:space:]]*=[[:space:]]*\\([^#]*\\).*/\\1/p" <<<"$constraints" \
             | head -1 | sed 's/[[:space:]]*$//')
         if [[ -n "$constraint" && -n "$latest" ]]; then
             if [[ "${latest#v}" != "${constraint}"* ]]; then
@@ -1978,6 +1870,8 @@ do_update() {
     fi
 
     echo ""
+    # Guard required: bash 3.2 (macOS /bin/bash) treats "${a[@]}" on an empty
+    # array as unbound under `set -u`.
     if [[ $changed -gt 0 ]]; then
         echo "  UPDATED (${changed}):"
         printf '%s\n' "${report[@]}"
@@ -2011,33 +1905,24 @@ do_check() {
     echo "============================================="
     echo ""
 
-    local drift=0
-    check_one() {
-        local name="$1" pinned="$2" installed="$3"
-        local want="${pinned#v}"; want="${want#jq-}"
+    local drift=0 row name bin key pinned installed
+    for row in neovim:nvim:NVIM_VERSION fzf:fzf:FZF_VERSION ripgrep:rg:RIPGREP_VERSION \
+        fd:fd:FD_VERSION bat:bat:BAT_VERSION jq:jq:JQ_VERSION yq:yq:YQ_VERSION \
+        k9s:k9s:K9S_VERSION lazygit:lazygit:LAZYGIT_VERSION delta:delta:DELTA_VERSION \
+        tree-sitter:tree-sitter:TREE_SITTER_CLI_VERSION; do
+        IFS=: read -r name bin key <<<"$row"
+        pinned=$(pin "$key")
+        installed=$(installed_version "$bin")
         if [[ -z "$installed" ]]; then
             printf "  %-16s %-22s %s\n" "$name" "$pinned" "NOT INSTALLED"
             drift=$((drift + 1))
-        elif echo "$installed" | grep -qF "$want"; then
+        elif version_matches "$pinned" "$installed"; then
             printf "  %-16s %-22s ok\n" "$name" "$pinned"
         else
-            printf "  %-16s %-22s DRIFT (installed: %s)\n" "$name" "$pinned" \
-                "$(echo "$installed" | grep -oE '[0-9][0-9.]*[0-9]' | head -1)"
+            printf "  %-16s %-22s DRIFT (installed: %s)\n" "$name" "$pinned" "$(bare_version "$installed")"
             drift=$((drift + 1))
         fi
-    }
-
-    check_one "neovim"   "$(pin NVIM_VERSION)"    "$(nvim --version 2>/dev/null | head -1)"
-    check_one "fzf"      "$(pin FZF_VERSION)"     "$(fzf --version 2>/dev/null | head -1)"
-    check_one "ripgrep"  "$(pin RIPGREP_VERSION)" "$(rg --version 2>/dev/null | head -1)"
-    check_one "fd"       "$(pin FD_VERSION)"      "$(fd --version 2>/dev/null | head -1)"
-    check_one "bat"      "$(pin BAT_VERSION)"     "$(bat --version 2>/dev/null | head -1)"
-    check_one "jq"       "$(pin JQ_VERSION)"      "$(jq --version 2>/dev/null)"
-    check_one "yq"       "$(pin YQ_VERSION)"      "$(yq --version 2>/dev/null | head -1)"
-    check_one "k9s"      "$(pin K9S_VERSION)"     "$(k9s version 2>/dev/null | grep -i 'Version:' | head -1)"
-    check_one "lazygit"  "$(pin LAZYGIT_VERSION)" "$(lazygit --version 2>/dev/null | head -1)"
-    check_one "delta"    "$(pin DELTA_VERSION)"   "$(delta --version 2>/dev/null | head -1)"
-    check_one "tree-sitter" "$(pin TREE_SITTER_CLI_VERSION)" "$(tree-sitter --version 2>/dev/null)"
+    done
 
     echo ""
     printf "  %-16s %s\n" "mason registry" "$(pin MASON_REGISTRY)"
@@ -2060,20 +1945,21 @@ check_prerequisites() {
 
     command_exists git  || missing+=("git")
     command_exists curl || missing+=("curl")
-    command_exists perl || missing+=("perl")
     # `make` is no longer required: the only consumer was telescope-fzf-native,
     # which has been replaced by fzf-lua (pure Lua, shells out to the fzf binary).
     # It stays listed for pyenv/goenv native builds but is no longer fatal.
     command_exists make || warn "make not found — needed only to build Python via pyenv or cgo tooling"
 
+    # Guard required: bash 3.2 (macOS /bin/bash) treats "${a[@]}" on an empty
+    # array as unbound under `set -u`.
     if [[ ${#missing[@]} -gt 0 ]]; then
         error "Missing required tools: ${missing[*]}"
         echo ""
         echo "  Install them before running this script:"
         echo ""
         echo "  macOS:          xcode-select --install   (includes git, make, curl)"
-        echo "  Debian/Ubuntu:  sudo apt-get install -y git curl perl build-essential"
-        echo "  Fedora/RHEL:    sudo dnf install -y git curl perl make gcc"
+        echo "  Debian/Ubuntu:  sudo apt-get install -y git curl build-essential"
+        echo "  Fedora/RHEL:    sudo dnf install -y git curl make gcc"
         echo ""
         exit 1
     fi
@@ -2098,12 +1984,11 @@ main() {
 
     check_prerequisites
 
-    local os; os=$(detect_os)
-    info "OS: $os | Arch: $(detect_arch)"
+    info "OS: $OS | Arch: $ARCH"
     info "Versions: pinned by versions.lock (no network version resolution)"
     echo ""
 
-    case "$os" in
+    case "$OS" in
         macos)
             if command_exists brew; then
                 :
@@ -2125,9 +2010,7 @@ main() {
 [[ -d /usr/local/bin ]] && export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
 BLOCK_EOF
             # tfenv requires GNU grep; macOS ships with BSD grep
-            if ! (command_exists brew && brew list grep &>/dev/null); then
-                run brew install grep
-            fi
+            command_exists brew && brew_ensure grep
             # Add GNU grep to PATH so it takes precedence over BSD grep
             add_line 'export PATH="$(brew --prefix)/opt/grep/libexec/gnubin:$PATH"' "${HOME}/.zshrc"
             ;;
@@ -2154,6 +2037,9 @@ BLOCK_EOF
     # never touch freshly generated content.
     migrate_legacy_zshrc
     warn_stale_backups
+
+    # Every installer writes into LOCAL_BIN, so create it once here.
+    $DRY_RUN || mkdir -p "$LOCAL_BIN"
 
     echo ""
     info "--- Installing tools ---"
@@ -2207,6 +2093,8 @@ BLOCK_EOF
 
     [[ -d "$BACKUP_DIR" ]] && info "Backups saved to: $BACKUP_DIR"
 
+    # Guard required: bash 3.2 (macOS /bin/bash) treats "${a[@]}" on an empty
+    # array as unbound under `set -u`.
     if [[ ${#MANUAL_STEPS[@]} -gt 0 ]]; then
         echo ""
         echo "  MANUAL STEPS REQUIRED:"
