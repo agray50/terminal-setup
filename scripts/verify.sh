@@ -418,21 +418,27 @@ vim.cmd("Lazy! load " .. table.concat({
 }, " "))
 vim.cmd("doautocmd User VeryLazy")
 
+-- One "lhs<TAB>desc<TAB>rhs" line per mapping, for the README check. The rhs
+-- matters because plugins' own mappings often have no desc -- the broken <C-\\>
+-- was vim-tmux-navigator's, an rhs of :TmuxNavigatePrevious.
 local out, seen = {}, {}
-local function add(lhs)
-	if lhs and lhs ~= "" and not seen[lhs] then
-		seen[lhs] = true
-		table.insert(out, lhs)
+local function field(v)
+	return (v or ""):gsub("[\t\n]", " ")
+end
+local function add(m)
+	if m.lhs and m.lhs ~= "" and not seen[m.lhs] then
+		seen[m.lhs] = true
+		table.insert(out, table.concat({ m.lhs, field(m.desc), field(m.rhs) }, "\t"))
 	end
 end
 
 local function collect()
 	for _, mode in ipairs({ "n", "v", "x", "o", "i", "t", "c" }) do
 		for _, m in ipairs(vim.api.nvim_get_keymap(mode)) do
-			add(m.lhs)
+			add(m)
 		end
 		for _, m in ipairs(vim.api.nvim_buf_get_keymap(0, mode)) do
-			add(m.lhs)
+			add(m)
 		end
 	end
 end
@@ -469,9 +475,9 @@ LUAEOF
     pass "dumped $n live mappings"
 
     if KEYS_FILE="$WORK/keys.txt" README_FILE="$REPO/README.md" python3 "$REPO/scripts/check_readme_keys.py"; then
-        pass "every key documented in README.md exists in the config"
+        pass "README and live keymaps agree: documented keys exist and do what it says, described leader keys are documented"
     else
-        fail "README documents keys that do not exist (see above)"
+        fail "README and live keymaps disagree (see above)"
     fi
 }
 

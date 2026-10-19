@@ -163,8 +163,9 @@ It checks that every Lua file parses and is stylua-clean, that `setup.sh` and `l
 (macOS's `/bin/bash`, which the script has to bootstrap under) and is shellcheck-clean, that
 `versions.lock` and the generated `nvim/lua/mason-pin.lua` agree, that the install path never
 resolves a version from the network, that a clean start produces **no warnings, lualine notices
-or errors**, that lualine's configured theme actually resolves, and that **every keybinding
-documented in this README actually exists in the config**.
+or errors**, that lualine's configured theme actually resolves, and that this README's keybinding
+tables match the live config **in both directions**: every documented key exists and its
+description matches what it actually does, and every described `<leader>` key is documented.
 
 `languages` builds a fixture with real root markers (`package.json`, `go.mod`, `Cargo.toml`,
 `pom.xml`, `Chart.yaml`, a git repo) — most servers refuse to start without one, so a bare
@@ -288,7 +289,7 @@ previews.
 | `]a` `[a` | Next / previous parameter |
 | `]t` `[t` | Next / previous **failed** test |
 | `]y` `[y` | Next / previous TODO comment |
-| `]q` `[q` · `]l` `[l` | Quickfix · location list |
+| `]q` `[q` · `]l` `[l` | Next / previous quickfix · location-list (loclist) item |
 
 #### Text objects (treesitter)
 
@@ -325,6 +326,7 @@ So `vaf` selects a function, `cif` rewrites its body, `dih` discards a hunk.
 | `<leader>fq` | Quickfix list |
 | `<leader>ft` | TODO comments |
 | `<leader>fh` / `<leader>fk` / `<leader>fc` | Help tags / keymaps / commands |
+| `<leader>fK` | All keymaps, grouped (which-key) |
 | `<leader>fC` | Colorschemes |
 | `<leader>f:` / `<leader>f?` | Command / search history |
 | **`<leader>fR`** | **Resume last picker** — reopens exactly where you left off |
@@ -382,7 +384,7 @@ ours / theirs / base / all / none.
 | `<leader>cs` / `<leader>cS` | Swap parameter with next / previous |
 | `<leader>cb` | Pick from breadcrumbs (dropbar) |
 | `<leader>cR` / `<leader>cI` | Restart LSP client / LSP status |
-| `<leader>cC` / `<leader>cm` | `:ConformInfo` / Mason UI |
+| `<leader>cC` / `<leader>cm` | Formatter info for this buffer (`:ConformInfo`) / Mason UI |
 | `<leader>cp` / `<leader>cx` | Copy file path / `chmod +x` this file |
 
 Java adds `<leader>cv` extract variable, `<leader>cn` extract constant, `<leader>cm` extract
@@ -434,7 +436,7 @@ configurations work unchanged.
 
 | Key | Action |
 |---|---|
-| `<S-h>` / `<S-l>` | Previous / next buffer |
+| `<S-h>` / `<S-l>` · `<leader>bp` / `<leader>bn` | Previous / next buffer |
 | `<leader>bd` / `<leader>bD` | Delete buffer **keeping the window layout** / force |
 | `<leader>bo` | Delete all other buffers |
 | `<leader>bs` / `<leader>bS` | Save / save all |
@@ -442,6 +444,7 @@ configurations work unchanged.
 | `<leader>wv` / `<leader>ws` | Split vertical / horizontal |
 | `<leader>wc` / `<leader>wo` | Close this / close others |
 | `<leader>wm` / `<leader>w=` | Maximise toggle / equalise |
+| `<leader>ww` / `<leader>wx` | Cycle windows / swap with the next one |
 | `<C-h/j/k/l>` | Move between windows (and tmux panes) |
 | `<C-Up/Down/Left/Right>` | Resize window |
 | `<leader>qq` / `<leader>qQ` / `<leader>qw` | Quit all / discard / save and quit |
@@ -463,6 +466,7 @@ configurations work unchanged.
 | `<leader>uw` / `<leader>ul` / `<leader>un` | Toggle wrap / relative numbers / line numbers |
 | `<leader>us` / `<leader>uc` | Toggle spell check / conceal |
 | `<leader>ui` / `<leader>uI` | Inspect treesitter tree / highlight under cursor |
+| `<leader>uN` | Notification history |
 
 #### Other
 
@@ -472,6 +476,7 @@ configurations work unchanged.
 | `<Esc>` | Clear search highlight |
 | `<C-\>` | Toggle floating terminal |
 | `<leader>sr` | Replace word under cursor in buffer |
+| `<leader>s*` | Search for the visual selection |
 | `<leader>y` / `<leader>Y` / `<leader>P` | Yank / yank line / paste — system clipboard |
 | `<leader>p` | Paste over selection without clobbering the register |
 | `<leader>X` | Delete without yanking |
