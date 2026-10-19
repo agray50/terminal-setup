@@ -34,7 +34,13 @@ require("core.autocmds")
 
 require("lazy").setup({
 	spec = { { import = "plugins" } },
-	defaults = { lazy = false },
+	-- Lazy by default. With `lazy = false` here, any top-level spec that
+	-- forgot an event/ft/cmd/keys trigger was silently eager — and one had:
+	-- mason-lspconfig, which then dragged in mason.nvim (defeating its own
+	-- cmd/keys laziness), nvim-lspconfig, blink.cmp and schemastore's 573 KB
+	-- catalog, about 23ms of a 60ms startup. Specs that genuinely must load at
+	-- startup say so explicitly (catppuccin, nvim-treesitter).
+	defaults = { lazy = true },
 	install = { colorscheme = { "catppuccin-mocha", "habamax" } },
 	checker = { enabled = false }, -- never auto-check for updates; see README
 	change_detection = { notify = false },

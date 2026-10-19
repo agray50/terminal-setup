@@ -158,22 +158,35 @@ return {
 			-------------------------------------------------------------
 			-- JSON / YAML — schemas from SchemaStore
 			-------------------------------------------------------------
+			-- The catalog behind schemastore is a single 573 KB Lua table, and
+			-- requiring it here loaded it on the first buffer of *any*
+			-- filetype — ~6ms to set up JSON schemas before opening a .go
+			-- file. before_init runs only once the server is actually
+			-- starting, and settings are sent to the server after it, so this
+			-- is the documented place to resolve them lazily.
 			vim.lsp.config("jsonls", {
+				before_init = function(_, config)
+					config.settings.json.schemas = require("schemastore").json.schemas()
+				end,
 				settings = {
 					json = {
-						schemas = require("schemastore").json.schemas(),
+						schemas = {},
 						validate = { enable = true },
 					},
 				},
 			})
 
 			vim.lsp.config("yamlls", {
+				-- Deferred for the same reason as jsonls above.
+				before_init = function(_, config)
+					config.settings.yaml.schemas = require("schemastore").yaml.schemas()
+				end,
 				settings = {
 					yaml = {
 						-- SchemaStore is more reliable than yamlls's own
 						-- schemaStore, which fetches at runtime and fails offline.
 						schemaStore = { enable = false, url = "" },
-						schemas = require("schemastore").yaml.schemas(),
+						schemas = {},
 						validate = true,
 						keyOrdering = false, -- k8s manifests are not alphabetical
 					},

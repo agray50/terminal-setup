@@ -37,6 +37,12 @@ return {
 
 	{
 		"mason-org/mason-lspconfig.nvim",
+		-- Same trigger as nvim-lspconfig. This spec had none at all, which
+		-- made it the one eagerly-loaded plugin in the config. Deferring is
+		-- safe: setup() installs a FileType autocmd, FileType fires after
+		-- BufReadPre, and vim.lsp.enable() additionally back-fills buffers
+		-- that are already open via `doautoall nvim.lsp.enable FileType`.
+		event = { "BufReadPre", "BufNewFile" },
 		dependencies = {
 			{ "mason-org/mason.nvim" },
 			"neovim/nvim-lspconfig",
