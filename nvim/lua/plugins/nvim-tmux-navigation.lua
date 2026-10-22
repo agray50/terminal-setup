@@ -36,9 +36,9 @@ return {
 		end
 	end,
 	keys = {
-		{ "<C-h>", "<cmd><C-U>TmuxNavigateLeft<cr>", desc = "󰁍 Pane left (tmux-aware)" },
-		{ "<C-j>", "<cmd><C-U>TmuxNavigateDown<cr>", desc = "󰁅 Pane below (tmux-aware)" },
-		{ "<C-k>", "<cmd><C-U>TmuxNavigateUp<cr>", desc = "󰁝 Pane above (tmux-aware)" },
-		{ "<C-l>", "<cmd><C-U>TmuxNavigateRight<cr>", desc = "󰁔 Pane right (tmux-aware)" },
+		{ "<C-h>", "<cmd>TmuxNavigateLeft<cr>", desc = "󰁍 Pane left (tmux-aware)" },
+		{ "<C-j>", "<cmd>TmuxNavigateDown<cr>", desc = "󰁅 Pane below (tmux-aware)" },
+		{ "<C-k>", "<cmd>TmuxNavigateUp<cr>", desc = "󰁝 Pane above (tmux-aware)" },
+		{ "<C-l>", "<cmd>TmuxNavigateRight<cr>", desc = "󰁔 Pane right (tmux-aware)" },
 	},
 }

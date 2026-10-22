@@ -479,6 +479,31 @@ LUAEOF
     else
         fail "README and live keymaps disagree (see above)"
     fi
+
+    # Pressing the keys, not just finding them: nvim 0.12 rejects a <C-U>
+    # inside <cmd> (E492), which left every <C-h/j/k/l> mapped but inert.
+    # Outside tmux the navigator falls back to wincmd, so a vsplit is enough.
+    cat > "$WORK/panes.lua" <<'LUAEOF'
+vim.cmd("Lazy! load vim-tmux-navigator")
+vim.cmd("vsplit")
+vim.cmd("wincmd h")
+local function press(key)
+	local before = vim.api.nvim_get_current_win()
+	vim.v.errmsg = ""
+	vim.api.nvim_feedkeys(vim.keycode(key), "xt", false)
+	return vim.api.nvim_get_current_win() ~= before and vim.v.errmsg == ""
+end
+local ok = press("<C-l>") and press("<C-h>")
+vim.fn.writefile({ ok and "ok" or ("fail: " .. vim.v.errmsg) }, vim.env.OUTFILE)
+LUAEOF
+    local out
+    out=$(env -u TMUX OUTFILE="$WORK/panes.txt" \
+        nvim --headless -c "luafile $WORK/panes.lua" -c "qa!" >/dev/null 2>&1; cat "$WORK/panes.txt" 2>/dev/null)
+    if [[ "$out" == ok ]]; then
+        pass "<C-h>/<C-l> move between splits"
+    else
+        fail "<C-h>/<C-l> do not move between splits (${out:-no result})"
+    fi
 }
 
 # -----------------------------------------------------------------------------
