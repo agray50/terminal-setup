@@ -625,7 +625,17 @@ install_sdkman() {
     add_block "sdkman" "${HOME}/.zshrc" <<'BLOCK_EOF'
 # SDKMAN
 export SDKMAN_DIR="$HOME/.sdkman"
-[[ -s "$HOME/.sdkman/bin/sdkman-init.sh" ]] && source "$HOME/.sdkman/bin/sdkman-init.sh"
+# sdkman-init.sh calls `cat`, and zsh expands aliases in sourced files. Once the
+# cat->bat alias below exists (any re-source of this file), sdkman would run bat
+# instead — "command not found" when ~/.local/bin isn't on PATH yet. Hide the
+# alias while sdkman loads, then put it back.
+if [[ -s "$HOME/.sdkman/bin/sdkman-init.sh" ]]; then
+    _ts_cat_alias=${aliases[cat]-}
+    unalias cat 2>/dev/null
+    source "$HOME/.sdkman/bin/sdkman-init.sh"
+    [[ -n $_ts_cat_alias ]] && aliases[cat]=$_ts_cat_alias
+    unset _ts_cat_alias
+fi
 BLOCK_EOF
 }
 
@@ -868,8 +878,27 @@ setup_local_bin() {
     # partial output over .zshrc would truncate it; `|| true` used to allow that.
     local tmp; tmp=$(mktemp "$WORK/tmp.XXXXXX")
     grep -vF "$line" "$zshrc" > "$tmp" || [[ $? -eq 1 ]]
-    mv "$tmp" "$zshrc"
-    echo "$line" >> "$zshrc"
+    # ...except it must precede tmux-autoattach: that block hands the shell to
+    # tmux, so anything after it never runs before tmux starts, and the tmux
+    # server would inherit a PATH without ~/.local/bin (bat, rg, fd, ...). Ubuntu
+    # masks this because ~/.profile already adds ~/.local/bin; macOS doesn't.
+    local marker="# >>> terminal-setup: tmux-autoattach >>>"
+    if grep -qxF "$marker" "$tmp"; then
+        local tmp2; tmp2=$(mktemp "$WORK/tmp.XXXXXX")
+        # Blank lines are held so the gap left by the removed line collapses
+        # rather than growing by one on every run.
+        awk -v m="$marker" -v l="$line" '
+            $0 == ""  { held++; next }
+            $0 == m   { if (held) print ""; print l; print ""; held = 0; print; next }
+            { while (held) { print ""; held-- } print }
+            END       { while (held) { print ""; held-- } }
+        ' "$tmp" > "$tmp2"
+        mv "$tmp2" "$zshrc"
+        rm -f "$tmp"
+    else
+        mv "$tmp" "$zshrc"
+        echo "$line" >> "$zshrc"
+    fi
     success "$LOCAL_BIN on PATH (last, so it takes precedence)"
 }
 
